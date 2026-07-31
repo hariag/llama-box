@@ -58,15 +58,14 @@ add_custom_target(patch
         VERBATIM
 )
 add_dependencies(version patch)
-add_dependencies(build_info patch)
-add_dependencies(version build_info patch)
+add_dependencies(llama-common-base patch)
 add_dependencies(ggml patch)
 add_dependencies(ggml-base patch)
 add_dependencies(ggml ggml-base patch)
 add_dependencies(llama ggml ggml-base patch)
 add_dependencies(stable-diffusion ggml ggml-base patch)
 add_dependencies(mtmd ggml ggml-base patch)
-add_dependencies(common ggml ggml-base patch)
+add_dependencies(llama-common ggml ggml-base patch)
 
 #
 # llama-box
@@ -99,7 +98,7 @@ if (GGML_MUSA)
     set(CMAKE_CXX_EXTENSIONS OFF)
 endif ()
 add_executable(${TARGET} engine.cpp engine_param.hpp httpserver.hpp rpcserver.hpp z_multimodal.hpp z_stablediffusion.hpp z_utils.hpp)
-target_link_libraries(${TARGET} PRIVATE version common mtmd stable-diffusion ${CMAKE_THREAD_LIBS_INIT})
+target_link_libraries(${TARGET} PRIVATE version llama-common mtmd stable-diffusion ${CMAKE_THREAD_LIBS_INIT})
 target_include_directories(${TARGET} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 if (WIN32)
     target_link_libraries(${TARGET} PRIVATE ws2_32)

@@ -508,7 +508,7 @@ struct rpcserver {
 
     bool load() {
         if (params.n_threads <= 0) {
-            params.n_threads = cpu_get_num_math();
+            params.n_threads = common_cpu_get_num_math();
         }
 
         backend = rpcserver_create_backend(params);
@@ -547,7 +547,7 @@ struct rpcserver {
         SRV_INF("%s", "starting\n");
 
         std::shared_ptr<httplib::ThreadPool> thread_pool =
-            std::make_shared<httplib::ThreadPool>(cpu_get_num_physical_cores(), 1024);
+            std::make_shared<httplib::ThreadPool>(common_cpu_get_num_physical_cores(), 1024);
         std::unique_ptr<rpc_socket_t> svr_socket             = nullptr;
         bool                          svr_socket_established = false;
 #ifdef _WIN32

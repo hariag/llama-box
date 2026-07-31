@@ -30,8 +30,7 @@ int main(int argc, char ** argv) {
             common_log_add(common_log_main(), level, "%s", text);
         },
         nullptr);
-    // NB(thxCode): clip_log_set is a patch.
-    clip_log_set(
+    mtmd_helper_log_set(
         [](ggml_log_level level, const char * text, void * /*user_data*/) {
             if (level == GGML_LOG_LEVEL_DEBUG && common_log_verbosity_thold < 6) {
                 return;
