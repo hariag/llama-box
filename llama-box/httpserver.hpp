@@ -17,6 +17,7 @@
 #include "llama.cpp/common/common.h"
 #include "llama.cpp/common/ngram-cache.h"
 #include "llama.cpp/common/sampling.h"
+#include "llama.cpp/common/speculative.h"
 #include "llama.cpp/tools/mtmd/clip.h"
 #include "llama.cpp/vendor/cpp-httplib/httplib.h"
 #include "stable-diffusion.cpp/stable-diffusion.h"
@@ -2668,8 +2669,10 @@ struct httpserver {
             clip_free(llm_ctx_clip_a);
         }
 
-        if (llm_ctx_draft != nullptr) {
+        if (draft_batch_initialized) {
             llama_batch_free(batch_text_draft);
+        }
+        if (llm_ctx_draft != nullptr) {
             llama_detach_threadpool(llm_ctx_draft);
         }
 
@@ -2771,6 +2774,13 @@ struct httpserver {
         }
 
         // load the draft model if needed.
+        mtp_enabled = std::find(params.llm_params.speculative.types.begin(),
+                                params.llm_params.speculative.types.end(),
+                                COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params.llm_params.speculative.types.end();
+        if (mtp_enabled && !params.llm_params.speculative.draft.mparams.path.empty()) {
+            SRV_ERR("%s", "MTP cannot be combined with an external draft model in this server\n");
+            return false;
+        }
         if (!params.llm_params.speculative.draft.mparams.path.empty() && params.llm_params.speculative.draft.n_max > 0) {
             SRV_INF("loading draft model '%s'\n", params.llm_params.speculative.draft.mparams.path.c_str());
 
@@ -2794,10 +2804,18 @@ struct httpserver {
             }
             llm_vocab_draft  = llama_model_get_vocab(llm_model_draft);
             batch_text_draft = llama_batch_init(int32_t(llama_n_ctx(llm_ctx_draft)), 0, 1);
+            draft_batch_initialized = true;
         }
 
         common_params llm_params = params.llm_params;
         llm_params.n_parallel    = params.llm_params.n_threads_http;
+        if (mtp_enabled) {
+            const int32_t n_outputs_per_seq = 1 + common_speculative_n_max(&llm_params.speculative);
+            const int64_t n_outputs = int64_t(llm_params.n_parallel) * n_outputs_per_seq;
+            llm_params.n_outputs_max = std::max<int32_t>(
+                llm_params.n_outputs_max,
+                std::max<int32_t>(1, std::min<int64_t>(llm_params.n_batch, n_outputs)));
+        }
         llm_init                 = common_init_from_params(llm_params);
         llm_model                = llm_init ? llm_init->model() : nullptr;
         llm_ctx                  = llm_init ? llm_init->context() : nullptr;
@@ -2819,6 +2837,29 @@ struct httpserver {
         batch_view_max       = int32_t(llama_n_batch(llm_ctx));
         batch_text           = llama_batch_init(llm_ctx_size, 0, 1);
         batch_text_temp      = llama_batch_init(llm_ctx_size, 0, 1);
+
+        if (mtp_enabled) {
+            common_params llm_params_mtp = common_base_params_to_speculative(llm_params);
+            try {
+                spec_init       = common_speculative_init_from_params(llm_params_mtp, llm_model, llm_ctx);
+                llm_ctx_draft   = spec_init ? spec_init->context() : nullptr;
+                if (llm_ctx_draft == nullptr) {
+                    SRV_ERR("failed to create MTP context for model, '%s'\n", params.llm_params.model.path.c_str());
+                    return false;
+                }
+
+                llm_params_mtp.speculative.draft.ctx_tgt = llm_ctx;
+                llm_params_mtp.speculative.draft.ctx_dft = llm_ctx_draft;
+                spec.reset(common_speculative_init(llm_params_mtp.speculative, llm_params.n_parallel));
+                if (!spec) {
+                    SRV_ERR("%s", "failed to initialize MTP speculative decoding context\n");
+                    return false;
+                }
+            } catch (const std::exception & e) {
+                SRV_ERR("failed to initialize MTP speculative decoding context: %s\n", e.what());
+                return false;
+            }
+        }
 
         // check multimodal projection model compatibility if needed
         if (llm_ctx_clip_v != nullptr || llm_ctx_clip_a != nullptr) {
@@ -3398,6 +3439,10 @@ struct httpserver {
     llama_context *     llm_ctx_draft    = nullptr;
     const llama_vocab * llm_vocab_draft  = nullptr;
     llama_batch         batch_text_draft = {};
+    bool                 draft_batch_initialized = false;
+    bool                 mtp_enabled             = false;
+    common_speculative_init_result_ptr spec_init;
+    common_speculative_ptr              spec;
 
     // thread pool
     ggml_backend_reg_t reg_cpu          = nullptr;
@@ -3612,6 +3657,12 @@ struct httpserver {
                 // decode again
                 decoded = llama_decode(input_ctx, input_batch_view);
             }
+            if (decoded == 0 && spec != nullptr && input_ctx == llm_ctx && input_batch_view.token != nullptr) {
+                if (!common_speculative_process(spec.get(), input_batch_view)) {
+                    SRV_ERR("%s", "failed to process speculative batch\n");
+                    decoded = -2;
+                }
+            }
             if (decoded != 0) {
                 break;
             }
@@ -3687,7 +3738,7 @@ struct httpserver {
                     }
                     // clean batch for later adding
                     common_batch_clear(batch_text);
-                    if (llm_ctx_draft != nullptr) {
+                    if (draft_batch_initialized) {
                         common_batch_clear(batch_text_draft);
                     }
                 }
@@ -3983,7 +4034,7 @@ struct httpserver {
                             const llama_token tok = tokenized_text[i_text];
                             const bool        emb = i_text + 1 == n_text;
                             common_batch_add(batch_text, tok, task->pos, { seq_id }, emb);
-                            if (llm_ctx_draft != nullptr) {
+                            if (draft_batch_initialized) {
                                 common_batch_add(batch_text_draft, tok, task->pos, { seq_id }, emb);
                             }
                             task->pos++;
@@ -4234,7 +4285,7 @@ struct httpserver {
                 // speculative - draft
                 // NB(thxCode): we don't need to decode in a loop like above,
                 // as the previous llm_ctx decode also shift the draft kv cache during failure decoding.
-                if (batch_text_draft.n_tokens > 0) {
+                if (draft_batch_initialized && batch_text_draft.n_tokens > 0) {
                     const int32_t decoded_draft =
                         decode_completion_task_batch(llm_ctx_draft, batch_text_draft, batch_task_ptrs);
                     if (decoded_draft != 0) {
@@ -4285,6 +4336,9 @@ struct httpserver {
                     const int32_t     tid    = task->get_id();
                     const std::string rid    = task->get_r_id();
                     const int32_t     seq_id = task->get_seq_id();
+                    if (mtp_enabled && spec != nullptr && task->n_decoded == 0) {
+                        common_speculative_begin(spec.get(), seq_id, task->processed_tokens);
+                    }
                     // sample token
                     //// default
                     if (task->drafted_tokens.empty()) {
@@ -4297,6 +4351,7 @@ struct httpserver {
                     }
                     //// include drafted tokens
                     else {
+                        uint16_t n_drafted_accepted = 0;
                         // +1 for main model decoded token
                         for (int32_t j = 0, s = int32_t(task->drafted_tokens.size()); j < s + 1; ++j) {
                             // greedy verification only
@@ -4327,7 +4382,11 @@ struct httpserver {
                                     break;
                                 }
                                 task->n_drafted_accepted++;
+                                n_drafted_accepted++;
                             }
+                        }
+                        if (mtp_enabled && spec != nullptr) {
+                            common_speculative_accept(spec.get(), seq_id, n_drafted_accepted);
                         }
                     }
                     // speculative - lookup
@@ -4694,7 +4753,29 @@ struct httpserver {
                         if (!task->tokenized_prompts_include_multimedias) {
                             task->drafted_tokens.clear();
                             //// draft
-                            if (llm_ctx_draft != nullptr) {
+                            if (mtp_enabled && spec != nullptr) {
+                                const int32_t n_draft_max = std::min(
+                                    params.llm_params.speculative.draft.n_max,
+                                    std::max(0, task->n_decoding_budget - 1));
+                                if (n_draft_max > 0) {
+                                    common_speculative_get_draft_params(spec.get(), seq_id) = {
+                                        /* .drafting = */ true,
+                                        /* .n_max    = */ n_draft_max,
+                                        /* .n_past   = */ task->pos,
+                                        /* .id_last  = */ task->processed_tokens.back(),
+                                        /* .prompt   = */ &task->processed_tokens,
+                                        /* .result   = */ &task->drafted_tokens,
+                                    };
+                                    common_speculative_draft(spec.get());
+                                    // The MTP draft context is only a staging context for
+                                    // speculative tokens.  Keep its KV cache aligned with
+                                    // the target context before the next target decode; the
+                                    // upstream server performs the same rollback after each
+                                    // draft round.
+                                    llama_memory_seq_rm(llama_get_memory(llm_ctx_draft), seq_id, task->pos, -1);
+                                    task->n_drafted += int32_t(task->drafted_tokens.size());
+                                }
+                            } else if (draft_batch_initialized) {
                                 // clean batch for later adding
                                 common_batch_clear(batch_text_draft);
                                 common_batch_add(batch_text_draft, task->processed_tokens.back(), task->pos, { seq_id },
@@ -5531,7 +5612,7 @@ struct httpserver {
                 { "mirostat_eta",                params.llm_params.sampling.mirostat_eta          },
                 { "support_vision",              llm_ctx_clip_v != nullptr                        },
                 { "support_audio",               llm_ctx_clip_a != nullptr                        },
-                { "support_speculative",         llm_ctx_draft != nullptr                         },
+                { "support_speculative",         spec != nullptr || llm_model_draft != nullptr    },
                 { "support_tool_calls",          support_tool_calls                               },
                 { "support_parallel_tool_calls", support_parallel_tool_calls                      },
                 { "support_reasoning",           support_reasoning                                },
@@ -5637,7 +5718,7 @@ struct httpserver {
             if (sampler == nullptr) {
                 return send_json(request, response, httplib::BadRequest_400, "Illegal param: \"sampling\" is invalid");
             }
-            if (llm_ctx_draft != nullptr) {
+            if (draft_batch_initialized) {
                 common_params_sampling sampling_draft = {};
                 sampling_draft.seed                   = req->sampling.seed;
                 sampling_draft.no_perf                = false;
@@ -6087,7 +6168,7 @@ struct httpserver {
             if (sampler == nullptr) {
                 return send_json(request, response, httplib::BadRequest_400, "Illegal param: \"sampling\" is invalid");
             }
-            if (llm_ctx_draft != nullptr) {
+            if (draft_batch_initialized) {
                 common_params_sampling sampling_draft;
                 sampling_draft.seed     = req->sampling.seed;
                 sampling_draft.no_perf  = false;

@@ -17,6 +17,7 @@
 #include "llama.cpp/common/common.h"
 #include "llama.cpp/common/json-schema-to-grammar.h"
 #include "llama.cpp/common/sampling.h"
+#include "llama.cpp/common/speculative.h"
 #include "llama.cpp/ggml/include/ggml.h"
 #include "llama.cpp/include/llama.h"
 #include "llama.cpp/vendor/nlohmann/json.hpp"
@@ -418,9 +419,14 @@ static void llama_box_params_print_usage(int, char ** argv, const llama_box_para
     // server // completion //
     // server // completion // speculative //
     opts.push_back({ "server/completion/speculative" });
-    opts.push_back({ "server/completion/speculative",      "       --draft-max, --draft, --draft-n N",      "Number of tokens to draft for speculative decoding (default: %d)", llm_params.speculative.draft.n_max });
-    opts.push_back({ "server/completion/speculative",      "       --draft-min, --draft-n-min N",           "Minimum number of draft tokens to use for speculative decoding (default: %d)", llm_params.speculative.draft.n_min });
-    opts.push_back({ "server/completion/speculative",      "       --draft-p-min N",                        "Minimum speculative decoding probability (greedy) (default: %.1f)", llm_params.speculative.draft.p_min });
+    opts.push_back({ "server/completion/speculative",      "       --spec-type TYPE",                        "Comma-separated speculative decoding types (default: %s)\n"
+                                                                                                            "  available: %s",
+                                                                                                            common_speculative_type_name_str(llm_params.speculative.types).c_str(),
+                                                                                                            common_speculative_all_types_str() });
+    opts.push_back({ "server/completion/speculative",      "       --mtp",                                  "Enable multi-token prediction (MTP) using the model's MTP head" });
+    opts.push_back({ "server/completion/speculative",      "       --spec-draft-n-max, --draft-max, --draft, --draft-n N", "Number of tokens to draft for speculative decoding (default: %d)", llm_params.speculative.draft.n_max });
+    opts.push_back({ "server/completion/speculative",      "       --spec-draft-n-min, --draft-min, --draft-n-min N",      "Minimum number of draft tokens to use for speculative decoding (default: %d)", llm_params.speculative.draft.n_min });
+    opts.push_back({ "server/completion/speculative",      "       --spec-draft-p-min, --draft-p-min N",                   "Minimum speculative decoding probability (greedy) (default: %.1f)", llm_params.speculative.draft.p_min });
     opts.push_back({ "server/completion/speculative",      "-md,   --model-draft FNAME",                    "Draft model for speculative decoding (default: unused)" });
     opts.push_back({ "server/completion/speculative",      "-devd, --device-draft <dev1,dev2,...>",         "A comma-separated list of devices to use for offloading the draft model (none = don't offload)\n"
                                                                                                             "Use --list-devices to see a list of available devices" });
@@ -1818,27 +1824,45 @@ static bool llama_box_params_parse(int argc, char ** argv, llama_box_params & pa
 
             // server // completion // speculative //
 
-            if (!strcmp(flag, "--draft") || !strcmp(flag, "--draft-max") || !strcmp(flag, "--draft-n")) {
+            if (!strcmp(flag, "--spec-type")) {
                 if (i == argc) {
-                    missing("--draft-max");
+                    missing("--spec-type");
+                }
+                char * arg = argv[i++];
+                const auto types = common_speculative_types_from_names(string_split<std::string>(arg, ','));
+                params_.hs_params.llm_params.speculative.types.insert(
+                    params_.hs_params.llm_params.speculative.types.end(), types.begin(), types.end());
+                continue;
+            }
+
+            if (!strcmp(flag, "--mtp")) {
+                params_.hs_params.llm_params.speculative.types.push_back(COMMON_SPECULATIVE_TYPE_DRAFT_MTP);
+                continue;
+            }
+
+            if (!strcmp(flag, "--spec-draft-n-max") || !strcmp(flag, "--draft") ||
+                !strcmp(flag, "--draft-max") || !strcmp(flag, "--draft-n")) {
+                if (i == argc) {
+                    missing("--spec-draft-n-max");
                 }
                 char * arg                                     = argv[i++];
                 params_.hs_params.llm_params.speculative.draft.n_max = std::stoi(std::string(arg));
                 continue;
             }
 
-            if (!strcmp(flag, "--draft-min") || !strcmp(flag, "--draft-n-min")) {
+            if (!strcmp(flag, "--spec-draft-n-min") || !strcmp(flag, "--draft-min") ||
+                !strcmp(flag, "--draft-n-min")) {
                 if (i == argc) {
-                    missing("--draft-min");
+                    missing("--spec-draft-n-min");
                 }
                 char * arg                                     = argv[i++];
                 params_.hs_params.llm_params.speculative.draft.n_min = std::stoi(std::string(arg));
                 continue;
             }
 
-            if (!strcmp(flag, "--draft-p-min")) {
+            if (!strcmp(flag, "--spec-draft-p-min") || !strcmp(flag, "--draft-p-min")) {
                 if (i == argc) {
-                    missing("--draft-p-min");
+                    missing("--spec-draft-p-min");
                 }
                 char * arg                                     = argv[i++];
                 params_.hs_params.llm_params.speculative.draft.p_min = std::stof(std::string(arg));
