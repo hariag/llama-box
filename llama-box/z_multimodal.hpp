@@ -393,8 +393,18 @@ static inline std::vector<llama_multimodal_tokens> tokenize_image(clip_ctx * ctx
                     result[0].n_tokens);
         }
         if (clip_is_qwen2vl(ctx_clip)) {
-            const int32_t ps = clip_get_patch_size(ctx_clip) * 2;
-            result[0].n_pos = clip_n_output_tokens_y(ctx_clip, &batch.entries[0]);
+            // Qwen2VL/Qwen3VL-family models use the actual projector output
+            // grid for M-RoPE.  The preprocessed image can be resized or
+            // padded, so deriving the grid from its pixel dimensions and
+            // patch size produces positions that are larger than the
+            // embedding sequence (notably for small images).
+            const int32_t grid_x = clip_n_output_tokens_x(ctx_clip, &batch.entries[0]);
+            const int32_t grid_y = clip_n_output_tokens_y(ctx_clip, &batch.entries[0]);
+            result[0].grid_size = clip_image_size{ grid_x, grid_y };
+            // M-RoPE advances the sequential position by the larger image
+            // grid dimension, not by the height alone.  This is important
+            // for non-square images and matches mtmd's decoder contract.
+            result[0].n_pos     = std::max(grid_x, grid_y);
         }
         result[0].dummy_token = multimodal_dummy_token_generator--;
     }

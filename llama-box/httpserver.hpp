@@ -2524,6 +2524,8 @@ struct images_task : btask {
     std::vector<std::string>                                      b64_jsons;
     std::vector<int32_t>                                          progressed_steps;
     std::vector<int32_t>                                          progress_steps;
+    bool                                                           failed = false;
+    std::string                                                    error_message;
 
     //// forward
     int32_t n_forward_steps = 0;  // indicate how many forwarded steps have been called
@@ -2576,6 +2578,9 @@ struct images_task : btask {
             }
         }
         resp["data"] = data;
+        if (failed) {
+            resp["error"] = { { "message", error_message } };
+        }
         return resp;
     }
 };
@@ -2831,7 +2836,14 @@ struct httpserver {
         llm_kv_cache_shift   = llama_memory_can_shift(llama_get_memory(llm_ctx));
         // NB(thxCode): llama_causal_attn is a patch.
         llm_model_casual     = llama_causal_attn(llm_ctx);
-        llm_model_rope_mrope = llama_model_rope_type(llm_model) == LLAMA_ROPE_TYPE_MROPE;
+        // Qwen3.5/Qwen3.8 use interleaved M-RoPE (IMRoPE).  It has the same
+        // four position planes as regular M-RoPE, but is exposed as a
+        // separate rope type by llama.cpp.  Treating it as normal 1-D RoPE
+        // makes the image embeddings advance by their physical token count
+        // while the prompt cursor advances by the logical image positions;
+        // the next text prefill then fails the sequence-position check.
+        const auto rope_type = llama_model_rope_type(llm_model);
+        llm_model_rope_mrope = rope_type == LLAMA_ROPE_TYPE_MROPE || rope_type == LLAMA_ROPE_TYPE_IMROPE;
         llm_model_n_swa      = llama_model_n_swa(llm_model);
         llm_model_arch_name  = llama_model_arch_name(llm_model);  // llama_model_arch_name is a patch.
         batch_view_max       = int32_t(llama_n_batch(llm_ctx));
@@ -3965,18 +3977,42 @@ struct httpserver {
                                             std::vector<llama_pos> pos(n_mtmd * 4);
                                             // vision (2d)
                                             if (!tokenized_mtmd.is_audio) {
-                                                clip_image_size & is = tokenized_mtmd.size;
-                                                const int32_t     ps = clip_get_patch_size(llm_ctx_clip_v) * 2;
-                                                const int32_t     ph = is.height / ps + (is.height % ps > 0);
-                                                const int32_t     pw = is.width / ps + (is.width % ps > 0);
-                                                for (int32_t y = 0; y < ph; y++) {
-                                                    for (int32_t x = 0; x < pw; x++) {
-                                                        const int i         = y * pw + x;
-                                                        pos[i]              = task->pos;
-                                                        pos[i + n_mtmd * 1] = task->pos + y;
-                                                        pos[i + n_mtmd * 2] = task->pos + x;
-                                                        pos[i + n_mtmd * 3] = 0;
-                                                    }
+                                                int32_t pw = 0;
+                                                const bool has_qwen_grid =
+                                                    clip_is_qwen2vl(llm_ctx_clip_v) &&
+                                                    tokenized_mtmd.grid_size.width > 0 &&
+                                                    tokenized_mtmd.grid_size.height > 0 &&
+                                                    int64_t(tokenized_mtmd.grid_size.width) *
+                                                            tokenized_mtmd.grid_size.height ==
+                                                        n_mtmd;
+                                                if (has_qwen_grid) {
+                                                    // Qwen2VL/Qwen3VL-family models use the projector output
+                                                    // grid.  The image may have been resized or padded, so
+                                                    // deriving the grid from transformed pixels can exceed the
+                                                    // embedding sequence for small images.
+                                                    pw = tokenized_mtmd.grid_size.width;
+                                                } else {
+                                                    // Preserve the legacy layout for other M-RoPE models.
+                                                    clip_image_size & is = tokenized_mtmd.size;
+                                                    const int32_t     ps = clip_get_patch_size(llm_ctx_clip_v) * 2;
+                                                    pw = is.width / ps + (is.width % ps > 0);
+                                                }
+                                                for (int32_t i = 0; i < n_mtmd; i++) {
+                                                    // Keep this adapter byte-for-byte equivalent to
+                                                    // mtmd_image_tokens_get_decoder_pos() for
+                                                    // MTMD_POS_TYPE_MROPE: x is the column and y is the
+                                                    // row.  The legacy cached-embedding path cannot pass an
+                                                    // opaque mtmd_image_tokens object to that API directly.
+                                                    const mtmd_decoder_pos decoder_pos{
+                                                        0,
+                                                        static_cast<uint32_t>(i % pw),
+                                                        static_cast<uint32_t>(i / pw),
+                                                        0,
+                                                    };
+                                                    pos[i]              = task->pos + decoder_pos.t;
+                                                    pos[i + n_mtmd * 1] = task->pos + decoder_pos.y;
+                                                    pos[i + n_mtmd * 2] = task->pos + decoder_pos.x;
+                                                    pos[i + n_mtmd * 3] = decoder_pos.z;
                                                 }
                                             }
                                             // audio (1d)
@@ -5042,8 +5078,10 @@ struct httpserver {
                         // get preview image
                         if (preview) {
                             auto        preview_img = sd_ctx->preview_image_stream(stream, true);
-                            std::string b64_json    = encode_base64(preview_img->data, preview_img->size);
-                            task->b64_jsons[n]      = std::move(b64_json);
+                            if (preview_img != nullptr) {
+                                std::string b64_json = encode_base64(preview_img->data, preview_img->size);
+                                task->b64_jsons[n]   = std::move(b64_json);
+                            }
                         }
                         json data = task->to_json(n);
                         process_task_results[tid]->enqueue(
@@ -5052,8 +5090,16 @@ struct httpserver {
                 } else {
                     // get generated image
                     auto        generated_img = sd_ctx->result_image_stream(stream);
-                    std::string b64_json      = encode_base64(generated_img->data, generated_img->size);
-                    task->b64_jsons[n]        = std::move(b64_json);
+                    if (generated_img == nullptr) {
+                        task->failed = true;
+                        task->error_message = "stable diffusion image generation failed";
+                        task->progressed_steps[n] = task->progress_steps[n] = 0;
+                        task->b64_jsons[n].clear();
+                        SRV_ERR("rid %s | image generation returned no image, n = %d\n", rid.c_str(), n);
+                        continue;
+                    }
+                    std::string b64_json = encode_base64(generated_img->data, generated_img->size);
+                    task->b64_jsons[n]   = std::move(b64_json);
                     // stream outputting, but not the last one
                     if (task->is_stream() && n + 1 < n_repeat) {
                         json data = task->to_json(n);
@@ -5083,7 +5129,8 @@ struct httpserver {
                 } else {
                     data = task->to_json(-1);
                 }
-                process_task_results[tid]->enqueue(std::make_unique<btask_result>(httplib::OK_200, std::move(data)));
+                process_task_results[tid]->enqueue(std::make_unique<btask_result>(
+                    task->failed ? httplib::InternalServerError_500 : httplib::OK_200, std::move(data)));
             }
             SRV_INF(
                 "rid %s | "

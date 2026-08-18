@@ -468,6 +468,10 @@ static void llama_box_params_print_usage(int, char ** argv, const llama_box_para
     opts.push_back({ "server/images",                      "       --image-clip-l-model PATH",              "Path to the CLIP Large (clip-l) text encoder, or use --model included" });
     opts.push_back({ "server/images",                      "       --image-clip-g-model PATH",              "Path to the CLIP Generic (clip-g) text encoder, or use --model included" });
     opts.push_back({ "server/images",                      "       --image-t5xxl-model PATH",               "Path to the Text-to-Text Transfer Transformer (t5xxl) text encoder, or use --model included" });
+    opts.push_back({ "server/images",                      "       --image-llm-model PATH",                 "Path to the Qwen Image language/vision encoder, or use --model included" });
+    opts.push_back({ "server/images",                      "       --image-llm-vision-model PATH",          "Optional separate vision encoder used by the image language model" });
+    opts.push_back({ "server/images",                      "       --image-qwen-image-zero-cond-t",         "Enable Qwen Image Edit 2511 zero conditional-timestep mode" });
+    opts.push_back({ "server/images",                      "       --image-flow-shift N",                   "Qwen Image flow-shift value (default: 3.0)" });
     opts.push_back({ "server/images",                      "       --image-no-vae-model-offload",           "Disable vae(taesd) model offload" });
     opts.push_back({ "server/images",                      "       --image-vae-model PATH",                 "Path to Variational AutoEncoder (vae), or use --model included" });
     opts.push_back({ "server/images",                      "       --image-vae-tiling",                     "Indicate to process vae decoder in tiles to reduce memory usage (default: %s)", sd_params.vae_tiling ? "enabled" : "disabled" });
@@ -2181,6 +2185,39 @@ static bool llama_box_params_parse(int argc, char ** argv, llama_box_params & pa
                 }
                 char * arg                              = argv[i++];
                 params_.hs_params.sd_params.t5xxl_model = std::string(arg);
+                continue;
+            }
+
+            if (!strcmp(flag, "--image-llm-model")) {
+                if (i == argc) {
+                    missing("--image-llm-model");
+                }
+                char * arg                            = argv[i++];
+                params_.hs_params.sd_params.llm_model = std::string(arg);
+                continue;
+            }
+
+            if (!strcmp(flag, "--image-llm-vision-model")) {
+                if (i == argc) {
+                    missing("--image-llm-vision-model");
+                }
+                char * arg                                  = argv[i++];
+                params_.hs_params.sd_params.llm_vision_model = std::string(arg);
+                continue;
+            }
+
+            if (!strcmp(flag, "--image-qwen-image-zero-cond-t") ||
+                !strcmp(flag, "--qwen-image-zero-cond-t")) {
+                params_.hs_params.sd_params.qwen_image_zero_cond_t = true;
+                continue;
+            }
+
+            if (!strcmp(flag, "--image-flow-shift")) {
+                if (i == argc) {
+                    missing("--image-flow-shift");
+                }
+                char * arg = argv[i++];
+                params_.hs_params.sd_params.flow_shift = std::stof(std::string(arg));
                 continue;
             }
 
