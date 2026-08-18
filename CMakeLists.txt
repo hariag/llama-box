@@ -2,6 +2,12 @@ cmake_minimum_required(VERSION 3.14) # for add_link_options and implicit target 
 project("llama-box" C CXX)
 include(CheckIncludeFileCXX)
 
+# The current llama.cpp keeps its install version scoped to its own
+# subdirectory, while mtmd is added separately by llama-box.
+if (NOT DEFINED LLAMA_INSTALL_VERSION)
+    set(LLAMA_INSTALL_VERSION 0.0.0)
+endif ()
+
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 cmake_policy(SET CMP0077 NEW)
 

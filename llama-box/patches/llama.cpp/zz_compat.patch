@@ -1,0 +1,294 @@
+diff --git a/common/chat.cpp b/common/chat.cpp
+index 7740f35c0..e7c71a040 100644
+--- a/common/chat.cpp
++++ b/common/chat.cpp
+@@ -706,6 +706,22 @@ std::string common_chat_templates_source(const struct common_chat_templates * tm
+     return tmpls->template_default->source();
+ }
+
++bool common_chat_templates_supports_tool_calls(const struct common_chat_templates * tmpls) {
++    if (tmpls == nullptr || tmpls->template_default == nullptr) {
++        return false;
++    }
++    const auto & tmpl = tmpls->template_tool_use ? *tmpls->template_tool_use : *tmpls->template_default;
++    return tmpl.original_caps().supports_tool_calls;
++}
++
++bool common_chat_templates_supports_parallel_tool_calls(const struct common_chat_templates * tmpls) {
++    if (tmpls == nullptr || tmpls->template_default == nullptr) {
++        return false;
++    }
++    const auto & tmpl = tmpls->template_tool_use ? *tmpls->template_tool_use : *tmpls->template_default;
++    return tmpl.original_caps().supports_parallel_tool_calls;
++}
++
+ common_chat_templates_ptr common_chat_templates_init(const struct llama_model * model,
+                                                      const std::string &        chat_template_override,
+                                                      const std::string &        bos_token_override,
+diff --git a/common/chat.h b/common/chat.h
+index 6d5b220ae..415832bdd 100644
+--- a/common/chat.h
++++ b/common/chat.h
+@@ -321,6 +321,8 @@ common_chat_templates_ptr common_chat_templates_init(const struct llama_model *
+
+ bool        common_chat_templates_was_explicit(const struct common_chat_templates * tmpls);
+ std::string common_chat_templates_source(const struct common_chat_templates * tmpls, const std::string & variant = "");
++bool common_chat_templates_supports_tool_calls(const struct common_chat_templates * tmpls);
++bool common_chat_templates_supports_parallel_tool_calls(const struct common_chat_templates * tmpls);
+
+ struct common_chat_params common_chat_templates_apply(const struct common_chat_templates *        tmpls,
+                                                       const struct common_chat_templates_inputs & inputs);
+diff --git a/common/common.cpp b/common/common.cpp
+index 1a0aeef4e..f6523fd15 100644
+--- a/common/common.cpp
++++ b/common/common.cpp
+@@ -1648,6 +1648,7 @@ struct llama_context_params common_context_params_to_llama(const common_params &
+     cparams.pooling_type      = params.pooling_type;
+     cparams.attention_type    = params.attention_type;
+     cparams.flash_attn_type   = params.flash_attn_type;
++    cparams.defrag_thold      = params.defrag_thold;
+     cparams.cb_eval           = params.cb_eval;
+     cparams.cb_eval_user_data = params.cb_eval_user_data;
+     cparams.offload_kqv       = !params.no_kv_offload;
+diff --git a/common/common.h b/common/common.h
+index 919c0ea10..d6f0b32df 100644
+--- a/common/common.h
++++ b/common/common.h
+@@ -494,6 +494,7 @@ struct common_params {
+     enum llama_pooling_type      pooling_type      = LLAMA_POOLING_TYPE_UNSPECIFIED; // pooling type for embeddings
+     enum llama_attention_type    attention_type    = LLAMA_ATTENTION_TYPE_UNSPECIFIED; // attention type for embeddings
+     enum llama_flash_attn_type   flash_attn_type   = LLAMA_FLASH_ATTN_TYPE_AUTO; // whether to use Flash Attention
++    float                         defrag_thold     = -1.0f; // KV cache defragmentation threshold
+
+     struct common_params_sampling    sampling;
+     struct common_params_speculative speculative;
+diff --git a/common/sampling.cpp b/common/sampling.cpp
+index 256ac161e..75b3d1e2d 100644
+--- a/common/sampling.cpp
++++ b/common/sampling.cpp
+@@ -643,6 +643,10 @@ llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_co
+     return id;
+ }
+
++llama_token common_sampler_sample2(struct common_sampler * gsmpl, struct llama_context * ctx, int idx) {
++    return common_sampler_sample(gsmpl, ctx, idx, false);
++}
++
+ std::vector<llama_token> common_sampler_sample_and_accept_n(struct common_sampler * gsmpl, struct llama_context * ctx, const std::vector<int> & idxs, const llama_tokens & draft, bool grammar_first) {
+     GGML_ASSERT(idxs.size() == draft.size() + 1 && "idxs.size() must be draft.size() + 1");
+
+diff --git a/common/sampling.h b/common/sampling.h
+index 4191988bb..49845ac02 100644
+--- a/common/sampling.h
++++ b/common/sampling.h
+@@ -64,6 +64,10 @@ struct llama_sampler * common_sampler_get(const struct common_sampler * gsmpl);
+ //
+ llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_context * ctx, int idx, bool grammar_first = false);
+
++// Compatibility entry point retained for llama-box and other embedders that use
++// the pre-refactor sampler API.
++llama_token common_sampler_sample2(struct common_sampler * gsmpl, struct llama_context * ctx, int idx);
++
+ // generalized version of common_sampler_sample
+ //
+ // will cross-reference the sampled tokens with a batch of draft tokens and accept those that match
+diff --git a/include/llama.h b/include/llama.h
+index a3ceecf5e..de6853972 100644
+--- a/include/llama.h
++++ b/include/llama.h
+@@ -566,9 +566,11 @@ extern "C" {
+
+     LLAMA_API const struct llama_model * llama_get_model   (const struct llama_context * ctx);
+     LLAMA_API           llama_memory_t   llama_get_memory  (const struct llama_context * ctx);
++    LLAMA_API bool llama_causal_attn(const struct llama_context * ctx);
+     LLAMA_API  enum llama_pooling_type   llama_pooling_type(const struct llama_context * ctx); // TODO: rename to llama_get_pooling_type
+
+     LLAMA_API const struct llama_vocab * llama_model_get_vocab(const struct llama_model * model);
++    LLAMA_API const char * llama_model_arch_name(const struct llama_model * model);
+     LLAMA_API enum llama_rope_type       llama_model_rope_type(const struct llama_model * model);
+
+     LLAMA_API int32_t llama_model_n_ctx_train  (const struct llama_model * model);
+@@ -1097,6 +1099,9 @@ extern "C" {
+     LLAMA_API llama_token llama_vocab_nl (const struct llama_vocab * vocab); // next-line
+     LLAMA_API llama_token llama_vocab_pad(const struct llama_vocab * vocab); // padding
+     LLAMA_API llama_token llama_vocab_mask(const struct llama_vocab * vocab); // mask
++    LLAMA_API llama_token llama_vocab_unk(const struct llama_vocab * vocab); // unknown
++
++    LLAMA_API const char * llama_chat_template_alias(const char * tmpl);
+
+     LLAMA_API bool llama_vocab_get_add_bos(const struct llama_vocab * vocab);
+     LLAMA_API bool llama_vocab_get_add_eos(const struct llama_vocab * vocab);
+diff --git a/src/llama-chat.cpp b/src/llama-chat.cpp
+index 6d822ec62..efb27ccd9 100644
+--- a/src/llama-chat.cpp
++++ b/src/llama-chat.cpp
+@@ -86,6 +86,27 @@ llm_chat_template llm_chat_template_from_str(const std::string & name) {
+     return LLM_CHAT_TEMPLATES.at(name);
+ }
+
++const char * llama_chat_template_alias(const char * tmpl) {
++    static thread_local std::string alias;
++    switch (llm_chat_detect_template(tmpl == nullptr ? std::string() : std::string(tmpl))) {
++        case LLM_CHAT_TEMPLATE_CHATML:      alias = "chatml"; break;
++        case LLM_CHAT_TEMPLATE_CHATGLM_4:   alias = "chatglm4"; break;
++        case LLM_CHAT_TEMPLATE_MISTRAL_V1:
++        case LLM_CHAT_TEMPLATE_MISTRAL_V3:
++        case LLM_CHAT_TEMPLATE_MISTRAL_V3_TEKKEN:
++        case LLM_CHAT_TEMPLATE_MISTRAL_V7:
++        case LLM_CHAT_TEMPLATE_MISTRAL_V7_TEKKEN: alias = "mistral-v3"; break;
++        case LLM_CHAT_TEMPLATE_DEEPSEEK:
++        case LLM_CHAT_TEMPLATE_DEEPSEEK_2:
++        case LLM_CHAT_TEMPLATE_DEEPSEEK_3: alias = "deepseek"; break;
++        case LLM_CHAT_TEMPLATE_COMMAND_R:   alias = "command-r"; break;
++        case LLM_CHAT_TEMPLATE_GEMMA:       alias = "gemma"; break;
++        case LLM_CHAT_TEMPLATE_LLAMA_3:     alias = "llama3"; break;
++        default:                            alias = "unknown"; break;
++    }
++    return alias.c_str();
++}
++
+ llm_chat_template llm_chat_detect_template(const std::string & tmpl) {
+     try {
+         return llm_chat_template_from_str(tmpl);
+diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index 5ef7becf6..e2928b2e6 100644
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -739,6 +739,10 @@ const llama_cparams & llama_context::get_cparams() const {
+     return cparams;
+ }
+
++bool llama_context::causal_attn() const {
++    return cparams.causal_attn;
++}
++
+ ggml_backend_sched_t llama_context::get_sched() const {
+     return sched.get();
+ }
+@@ -3758,6 +3762,10 @@ llama_memory_t llama_get_memory(const struct llama_context * ctx) {
+     return ctx->get_memory();
+ }
+
++bool llama_causal_attn(const struct llama_context * ctx) {
++    return ctx != nullptr && ctx->causal_attn();
++}
++
+ float * llama_get_embeddings_nextn(llama_context * ctx) {
+     ctx->synchronize();
+
+diff --git a/src/llama-context.h b/src/llama-context.h
+index bf91daa8b..c01684bc4 100644
+--- a/src/llama-context.h
++++ b/src/llama-context.h
+@@ -59,6 +59,7 @@ struct llama_context {
+
+     const llama_model   & get_model()   const;
+     const llama_cparams & get_cparams() const;
++    bool causal_attn() const;
+
+     ggml_backend_sched_t get_sched() const;
+
+diff --git a/src/llama-model.cpp b/src/llama-model.cpp
+index 5e501f983..f8dd1551d 100644
+--- a/src/llama-model.cpp
++++ b/src/llama-model.cpp
+@@ -1675,6 +1675,12 @@ std::string llama_model::arch_name() const {
+     return llm_arch_name(arch);
+ }
+
++const char * llama_model_arch_name(const struct llama_model * model) {
++    static thread_local std::string name;
++    name = model == nullptr ? std::string() : model->arch_name();
++    return name.c_str();
++}
++
+ std::string llama_model::type_name() const {
+     return llm_type_name(type);
+ }
+diff --git a/src/llama-vocab.cpp b/src/llama-vocab.cpp
+index 443cd4640..f5a1f3c57 100644
+--- a/src/llama-vocab.cpp
++++ b/src/llama-vocab.cpp
+@@ -4200,6 +4200,10 @@ llama_token llama_vocab_pad(const struct llama_vocab * vocab) {
+     return vocab->token_pad();
+ }
+
++llama_token llama_vocab_unk(const struct llama_vocab * vocab) {
++    return vocab->token_unk();
++}
++
+ bool llama_vocab_get_add_bos(const struct llama_vocab * vocab) {
+     return vocab->get_add_bos();
+ }
+diff --git a/tools/mtmd/clip-impl.h b/tools/mtmd/clip-impl.h
+index 589fc724e..eaf7fc71e 100644
+--- a/tools/mtmd/clip-impl.h
++++ b/tools/mtmd/clip-impl.h
+@@ -724,6 +724,7 @@ static std::ifstream open_ifstream_binary(const std::string & fname) {
+ }
+ #endif
+
++#ifndef DIRECTORY_SEPARATOR
+ static std::string string_format(const char * fmt, ...) {
+     va_list ap;
+     va_list ap2;
+@@ -755,6 +756,7 @@ static void string_replace_all(std::string & s, const std::string & search, cons
+     builder.append(s, last_pos, std::string::npos);
+     s = std::move(builder);
+ }
++#endif
+
+ // split string by a `std::string delim` instead of `char delim`
+ static std::vector<std::string> string_split_str(std::string s, const std::string & delimiter) {
+@@ -771,6 +773,7 @@ static std::vector<std::string> string_split_str(std::string s, const std::strin
+ }
+
+ // remove when moving to c++20
++#ifndef DIRECTORY_SEPARATOR
+ inline bool string_starts_with(std::string_view str, std::string_view prefix) {
+     return str.size() >= prefix.size() &&
+            str.compare(0, prefix.size(), prefix) == 0;
+@@ -781,6 +784,7 @@ inline bool string_ends_with(std::string_view str, std::string_view suffix) {
+     return str.size() >= suffix.size() &&
+            str.compare(str.size() - suffix.size(), suffix.size(), suffix) == 0;
+ }
++#endif
+
+ //
+ // gguf utils
+diff --git a/tools/mtmd/mtmd-helper.cpp b/tools/mtmd/mtmd-helper.cpp
+index 90451d02e..ffce0750c 100644
+--- a/tools/mtmd/mtmd-helper.cpp
++++ b/tools/mtmd/mtmd-helper.cpp
+@@ -510,6 +510,11 @@ static bool decode_audio_from_buf(const unsigned char * buf_in, size_t len, int
+
+ } // namespace audio_helpers
+
++bool mtmd_helper_decode_audio_from_buf(const unsigned char * buf_in, size_t len, int target_sampler_rate,
++                                       std::vector<float> & pcmf32_mono) {
++    return audio_helpers::decode_audio_from_buf(buf_in, len, target_sampler_rate, pcmf32_mono);
++}
++
+ // Computes FNV-1a hash of the data
+ static std::string fnv_hash(const uint8_t * data, size_t len) {
+     const uint64_t fnv_prime = 0x100000001b3ULL;
+diff --git a/tools/mtmd/mtmd-helper.h b/tools/mtmd/mtmd-helper.h
+index 680a2317d..841d14636 100644
+--- a/tools/mtmd/mtmd-helper.h
++++ b/tools/mtmd/mtmd-helper.h
+@@ -159,6 +159,15 @@ MTMD_API int32_t mtmd_helper_video_read_next(mtmd_helper_video * ctx,
+
+ #ifdef __cplusplus
+ } // extern "C"
++
++#include <vector>
++
++// C++ convenience wrapper used by applications that already own an encoded
++// audio request body.  The underlying decoder remains private to mtmd-helper.
++MTMD_API bool mtmd_helper_decode_audio_from_buf(const unsigned char * buf_in,
++                                                size_t len,
++                                                int target_sampler_rate,
++                                                std::vector<float> & pcmf32_mono);
+ #endif
+
+ #ifdef __cplusplus

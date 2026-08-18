@@ -10,6 +10,42 @@
 #include "llama.cpp/common/log.h"
 #include "llama.cpp/vendor/nlohmann/json.hpp"
 
+// Kept as a compatibility declaration for llama-box's existing verbosity
+// macros.  New upstream code should prefer common_log_get_verbosity_thold().
+extern int common_log_verbosity_thold;
+
+static inline std::string common_model_alias_value(const common_params & params) {
+    return params.model_alias.empty() ? params.model.path : *params.model_alias.begin();
+}
+
+static inline void common_model_alias_set(common_params & params, const std::string & alias) {
+    params.model_alias.clear();
+    if (!alias.empty()) {
+        params.model_alias.insert(alias);
+    }
+}
+
+static inline size_t common_lcp(const llama_tokens & lhs, const llama_tokens & rhs) {
+    const size_t n = std::min(lhs.size(), rhs.size());
+    size_t i = 0;
+    while (i < n && lhs[i] == rhs[i]) {
+        ++i;
+    }
+    return i;
+}
+
+static inline int32_t llama_box_memory_tokens(const llama_context * ctx) {
+    if (ctx == nullptr) {
+        return 0;
+    }
+    const llama_memory_t memory = llama_get_memory(ctx);
+    if (memory == nullptr) {
+        return 0;
+    }
+    const llama_pos max_pos = llama_memory_seq_pos_max(memory, 0);
+    return max_pos < 0 ? 0 : static_cast<int32_t>(max_pos + 1);
+}
+
 // defines
 
 #define SRV_INF(fmt, ...) LOG_INF("srv %25.*s: " fmt, 25, __func__, __VA_ARGS__)

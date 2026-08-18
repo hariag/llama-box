@@ -17,6 +17,7 @@
 #include "llama.cpp/common/common.h"
 #include "llama.cpp/common/ngram-cache.h"
 #include "llama.cpp/common/sampling.h"
+#include "llama.cpp/common/speculative.h"
 #include "llama.cpp/tools/mtmd/clip.h"
 #include "llama.cpp/vendor/cpp-httplib/httplib.h"
 #include "stable-diffusion.cpp/stable-diffusion.h"
@@ -36,7 +37,6 @@
 #define HEADER_X_REQUEST_TOKENS_PER_SECOND "X-Request-Tokens-Per-Second"
 
 using namespace moodycamel;
-using json = nlohmann::json;
 
 // types
 
@@ -166,7 +166,7 @@ static inline common_params_sampling prepare_sampling(const json & data, const c
     {
         const json & samplers = data.at("samplers");
         if (samplers.is_array()) {
-            params.samplers = common_sampler_types_from_names(samplers.get<std::vector<std::string>>(), false);
+            params.samplers = common_sampler_types_from_names(samplers.get<std::vector<std::string>>());
         } else if (samplers.is_string()) {
             params.samplers = common_sampler_types_from_chars(samplers.get<std::string>());
         }
@@ -207,12 +207,13 @@ static inline common_params_sampling prepare_sampling(const json & data, const c
     if (data.contains("json_schema") && !data.contains("grammar")) {
         try {
             json schema    = json_value(data, "json_schema", json::object());
-            params.grammar = json_schema_to_grammar(schema);
+            params.grammar = { COMMON_GRAMMAR_TYPE_OUTPUT_FORMAT, json_schema_to_grammar(schema) };
         } catch (const std::exception & e) {
             throw std::invalid_argument("Illegal param: \"json_schema\": " + std::string(e.what()));
         }
     } else if (data.contains("grammar")) {
-        params.grammar = json_value(data, "grammar", defaults.grammar);
+        params.grammar = { COMMON_GRAMMAR_TYPE_USER,
+                           json_value(data, "grammar", common_grammar_value(defaults.grammar)) };
     }
     if (json_value(data, "ignore_eos", false)) {
         const llama_vocab * vocab     = llama_model_get_vocab(llama_get_model(llm_ctx));
@@ -268,7 +269,7 @@ static inline stablediffusion_params_sampling prepare_sampling(const json &     
 }
 
 // prepare_sampling, returns stable-diffusion.cpp sampling params.
-static inline stablediffusion_params_sampling prepare_sampling(const httplib::MultipartFormDataMap &   req,
+static inline stablediffusion_params_sampling prepare_sampling(const httplib::FormFiles &             req,
                                                                const stablediffusion_params_sampling & defaults) {
     stablediffusion_params_sampling params = defaults;  // copy
     if (req.find("sampler") == req.end() && req.find("sample_method") == req.end()) {
@@ -553,7 +554,7 @@ static inline std::unique_ptr<tokenize_req> get_tokenize_req(const httplib::Requ
 
     std::unique_ptr<tokenize_req> ptr = std::make_unique<tokenize_req>(rid.c_str());
 
-    ptr->model = json_value(req, "model", params.model_alias);
+    ptr->model = json_value(req, "model", common_model_alias_value(params));
 
     ptr->content = req.at("content");
 
@@ -598,7 +599,7 @@ static inline std::unique_ptr<detokenize_req> get_detokenize_req(const httplib::
 
     std::unique_ptr<detokenize_req> ptr = std::make_unique<detokenize_req>(rid.c_str());
 
-    ptr->model = json_value(req, "model", params.model_alias);
+    ptr->model = json_value(req, "model", common_model_alias_value(params));
 
     ptr->tokens = req.at("tokens");
 
@@ -707,7 +708,7 @@ static inline std::unique_ptr<legacy_complete_req> get_legacy_complete_req(const
         }
     }
 
-    ptr->model = json_value(req, "model", params.model_alias);
+    ptr->model = json_value(req, "model", common_model_alias_value(params));
 
     ptr->prompt = req.at("prompt");
 
@@ -811,14 +812,20 @@ static inline std::unique_ptr<legacy_complete_req> get_legacy_complete_req(const
 }
 
 struct clip_multimedia {
-    clip_image_u8_ptr ptr;
-    std::string       hash;
-    bool              is_audio = false;
+    std::unique_ptr<clip_image_u8> ptr;
+    std::vector<float>             audio;
+    std::string                    hash;
+    bool                           is_audio = false;
 
-    clip_multimedia(clip_image_u8_ptr && ptr, std::string && hash, bool is_audio = false) :
+    clip_multimedia(std::unique_ptr<clip_image_u8> && ptr, std::string && hash, bool is_audio = false) :
         ptr(std::move(ptr)),
         hash(std::move(hash)),
         is_audio(is_audio) {}
+
+    clip_multimedia(std::vector<float> && audio, std::string && hash) :
+        audio(std::move(audio)),
+        hash(std::move(hash)),
+        is_audio(true) {}
 };
 
 static inline std::unique_ptr<clip_multimedia> get_clip_image(std::vector<uint8_t> && img_buff) {
@@ -841,11 +848,11 @@ static inline std::unique_ptr<clip_multimedia> get_clip_image(std::vector<uint8_
         throw std::invalid_argument("Illegal param: provided image is invalid");
     }
 
-    clip_image_u8_ptr ptr(clip_image_u8_init());
-    ptr->nx = w;
-    ptr->ny = h;
-    ptr->buf.resize(w * h * 3);
-    std::memcpy(ptr->buf.data(), dt, ptr->buf.size());
+    auto ptr = std::make_unique<clip_image_u8>();
+    ptr->set_size({w, h}, false);
+    std::vector<uint8_t> pixels(static_cast<size_t>(w) * static_cast<size_t>(h) * 3);
+    std::memcpy(pixels.data(), dt, pixels.size());
+    ptr->cpy_buf(pixels);
     stbi_image_free(dt);
 
     return std::make_unique<clip_multimedia>(std::move(ptr), std::move(hash));
@@ -860,17 +867,11 @@ static inline std::unique_ptr<clip_multimedia> get_clip_audio(std::vector<uint8_
     }
 
     std::vector<float> dt;
-    if (!decode_audio_from_buf(aud_buff.data(), aud_buff.size(), COMMON_SAMPLE_RATE, dt)) {
+    if (!mtmd_helper_decode_audio_from_buf(aud_buff.data(), aud_buff.size(), 16000, dt)) {
         throw std::invalid_argument("Illegal param: provided audio is invalid");
     }
 
-    clip_image_u8_ptr ptr(clip_image_u8_init());
-    ptr->nx = int(dt.size());
-    ptr->ny = 1;
-    ptr->buf.resize(dt.size() * sizeof(float));
-    std::memcpy(ptr->buf.data(), dt.data(), ptr->buf.size());
-
-    return std::make_unique<clip_multimedia>(std::move(ptr), std::move(hash), true);
+    return std::make_unique<clip_multimedia>(std::move(dt), std::move(hash));
 }
 
 struct chat_complete_req : complete_req {
@@ -965,7 +966,7 @@ static inline std::unique_ptr<chat_complete_req> get_chat_complete_req(
         }
     }
 
-    ptr->model = json_value(req, "model", params.model_alias);
+    ptr->model = json_value(req, "model", common_model_alias_value(params));
 
     {
         json messages = req.at("messages");
@@ -1047,7 +1048,7 @@ static inline std::unique_ptr<chat_complete_req> get_chat_complete_req(
                                 cli.set_default_headers({
                                     { "User-Agent", "llama-box" }
                                 });               // set user-agent
-                                cli.set_url_encode(true);                           // encode URL
+                                cli.set_path_encode(true);                           // encode URL path
                                 cli.set_tcp_nodelay(true);                          // disable Nagle's algorithm
 #ifdef CPPHTTPLIB_OPENSSL_SUPPORT
                                 cli.enable_server_certificate_verification(false);  // disable SSL verification
@@ -1364,12 +1365,11 @@ static inline std::unique_ptr<chat_complete_req> get_chat_complete_req(
         inputs.add_generation_prompt = json_value(req, "add_generation_prompt", true);
         inputs.use_jinja             = params.use_jinja;
         inputs.parallel_tool_calls   = ptr->parallel_tool_calls;
-        inputs.enable_thinking       = params.reasoning_budget != 0;
+        inputs.enable_thinking       = params.sampling.reasoning_budget_tokens != 0;
         for (const auto & item : params.default_template_kwargs) {
             inputs.chat_template_kwargs[item.first] = item.second;
         }
-        // NB(thxCode): common_chat_templates_apply2 is a patch.
-        ptr->chat_params = common_chat_templates_apply2(llama_get_model(llm_ctx), chat_templates, inputs);
+        ptr->chat_params = common_chat_templates_apply(chat_templates, inputs);
         SRV_INFV(3, "rid %s | formatted prompt\n%s\n", rid.c_str(), ptr->chat_params.prompt.c_str());
     };
 
@@ -1383,7 +1383,8 @@ static inline std::unique_ptr<chat_complete_req> get_chat_complete_req(
         ptr->sampling.temp            = ptr->temperature;
         ptr->sampling.top_p           = ptr->top_p;
         if (!ptr->chat_params.grammar.empty()) {
-            ptr->sampling.grammar      = ptr->chat_params.grammar;
+            ptr->sampling.grammar      = { COMMON_GRAMMAR_TYPE_TOOL_CALLS, ptr->chat_params.grammar };
+            ptr->sampling.generation_prompt = ptr->chat_params.generation_prompt;
             ptr->sampling.grammar_lazy = ptr->chat_params.grammar_lazy;
             const llama_vocab * vocab  = llama_model_get_vocab(llama_get_model(llm_ctx));
             for (const std::string & t : ptr->chat_params.preserved_tokens) {
@@ -1446,7 +1447,7 @@ static inline std::unique_ptr<embed_req> get_embed_req(const httplib::Request & 
 
     std::unique_ptr<embed_req> ptr = std::make_unique<embed_req>(rid.c_str());
 
-    ptr->model = json_value(req, "model", params.model_alias);
+    ptr->model = json_value(req, "model", common_model_alias_value(params));
 
     ptr->input = req.at("input");
 
@@ -1503,7 +1504,7 @@ static inline std::unique_ptr<rerank_req> get_rerank_req(const httplib::Request 
 
     std::unique_ptr<rerank_req> ptr = std::make_unique<rerank_req>(rid.c_str());
 
-    ptr->model = json_value(req, "model", params.model_alias);
+    ptr->model = json_value(req, "model", common_model_alias_value(params));
 
     ptr->query = req.at("query");
 
@@ -1750,7 +1751,7 @@ static inline std::unique_ptr<image_edit_req> get_image_edit_req(const httplib::
     const stablediffusion_params & params = hparams.sd_params;
 
     const std::string                     rid = response.get_header_value(HEADER_X_REQUEST_ID);
-    const httplib::MultipartFormDataMap & req = request.files;
+    const httplib::FormFiles & req = request.form.files;
     if (req.find("prompt") == req.end()) {
         throw std::invalid_argument("Illegal param: \"prompt\" is required");
     } else if (req.find("image") == req.end()) {
@@ -2125,7 +2126,7 @@ struct completions_task : btask {
     // input
     std::unique_ptr<RatelimitTokenBucket>                            token_bucket = nullptr;
     std::vector<std::variant<llama_tokens, llama_multimodal_tokens>> tokenized_prompts;
-    common_chat_syntax                                               tokenized_prompts_syntax;
+    common_chat_parser_params                                        tokenized_prompts_syntax;
     bool                                                             tokenized_prompts_include_multimedias = false;
     bool                                                             tokenized_prompts_include_tools       = false;
     std::string                                                      cmpl_id;
@@ -2668,8 +2669,10 @@ struct httpserver {
             clip_free(llm_ctx_clip_a);
         }
 
-        if (llm_ctx_draft != nullptr) {
+        if (draft_batch_initialized) {
             llama_batch_free(batch_text_draft);
+        }
+        if (llm_ctx_draft != nullptr) {
             llama_detach_threadpool(llm_ctx_draft);
         }
 
@@ -2737,13 +2740,13 @@ struct httpserver {
 
         if (params.llm_params.model_alias.empty()) {
             if (params.llm_params.model.path.find_last_of('/') != std::string::npos) {
-                params.llm_params.model_alias =
-                    params.llm_params.model.path.substr(params.llm_params.model.path.find_last_of('/') + 1);
+                common_model_alias_set(params.llm_params,
+                                       params.llm_params.model.path.substr(params.llm_params.model.path.find_last_of('/') + 1));
             } else if (params.llm_params.model.path.find_last_of('\\') != std::string::npos) {
-                params.llm_params.model_alias =
-                    params.llm_params.model.path.substr(params.llm_params.model.path.find_last_of('\\') + 1);
+                common_model_alias_set(params.llm_params,
+                                       params.llm_params.model.path.substr(params.llm_params.model.path.find_last_of('\\') + 1));
             } else {
-                params.llm_params.model_alias = params.llm_params.model.path;
+                common_model_alias_set(params.llm_params, params.llm_params.model.path);
             }
         }
 
@@ -2755,12 +2758,12 @@ struct httpserver {
                 SRV_WRN("%s", "n_ctx is too small for multimodal projection, setting to 2048\n");
                 params.llm_params.n_ctx = 2048;
             }
-            // NB(thxCode): clip_context_params is a patch.
-            clip_context_params llm_params_clip{
-                /* use_gpu */ params.llm_params.n_gpu_layers != 0,
-                /* verbosity */ common_log_verbosity_thold > 3 ? GGML_LOG_LEVEL_DEBUG : GGML_LOG_LEVEL_INFO,
-                /* max_image_size */ params.max_image_size,
-            };
+            clip_context_params llm_params_clip{};
+            llm_params_clip.use_gpu       = params.llm_params.n_gpu_layers != 0;
+            llm_params_clip.flash_attn_type = CLIP_FLASH_ATTN_TYPE_AUTO;
+            llm_params_clip.image_min_tokens = -1;
+            llm_params_clip.image_max_tokens = -1;
+            llm_params_clip.warmup         = true;
             llm_init_clip = clip_init(params.llm_params.mmproj.path.c_str(), llm_params_clip);
             if (llm_init_clip.ctx_a == nullptr && llm_init_clip.ctx_v == nullptr) {
                 SRV_ERR("failed to load multimodal project model, '%s'\n", params.llm_params.mmproj.path.c_str());
@@ -2771,36 +2774,51 @@ struct httpserver {
         }
 
         // load the draft model if needed.
-        if (!params.llm_params.speculative.model.path.empty() && params.llm_params.speculative.n_max > 0) {
-            SRV_INF("loading draft model '%s'\n", params.llm_params.speculative.model.path.c_str());
+        mtp_enabled = std::find(params.llm_params.speculative.types.begin(),
+                                params.llm_params.speculative.types.end(),
+                                COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params.llm_params.speculative.types.end();
+        if (mtp_enabled && !params.llm_params.speculative.draft.mparams.path.empty()) {
+            SRV_ERR("%s", "MTP cannot be combined with an external draft model in this server\n");
+            return false;
+        }
+        if (!params.llm_params.speculative.draft.mparams.path.empty() && params.llm_params.speculative.draft.n_max > 0) {
+            SRV_INF("loading draft model '%s'\n", params.llm_params.speculative.draft.mparams.path.c_str());
 
             common_params llm_params_draft         = params.llm_params;
             llm_params_draft.n_parallel            = params.llm_params.n_threads_http;
             llm_params_draft.embedding             = false;
-            llm_params_draft.model                 = params.llm_params.speculative.model;
-            llm_params_draft.n_gpu_layers          = params.llm_params.speculative.n_gpu_layers;
-            llm_params_draft.cpuparams             = params.llm_params.speculative.cpuparams;
-            llm_params_draft.cpuparams_batch       = params.llm_params.speculative.cpuparams_batch;
-            llm_params_draft.tensor_buft_overrides = params.llm_params.speculative.tensor_buft_overrides;
+            llm_params_draft.model                 = params.llm_params.speculative.draft.mparams;
+            llm_params_draft.n_gpu_layers          = params.llm_params.speculative.draft.n_gpu_layers;
+            llm_params_draft.cpuparams             = params.llm_params.speculative.draft.cpuparams;
+            llm_params_draft.cpuparams_batch       = params.llm_params.speculative.draft.cpuparams_batch;
+            llm_params_draft.tensor_buft_overrides = params.llm_params.speculative.draft.tensor_buft_overrides;
             llm_params_draft.cache_type_k          = GGML_TYPE_F16;
             llm_params_draft.cache_type_v          = GGML_TYPE_F16;
             llm_params_draft.warmup                = false;
             llm_init_draft                         = common_init_from_params(llm_params_draft);
-            llm_model_draft                        = llm_init_draft.model.get();
-            llm_ctx_draft                          = llm_init_draft.context.get();
+            llm_model_draft                        = llm_init_draft ? llm_init_draft->model() : nullptr;
+            llm_ctx_draft                          = llm_init_draft ? llm_init_draft->context() : nullptr;
             if (llm_model_draft == nullptr) {
-                SRV_ERR("failed to load draft model, '%s'\n", params.llm_params.speculative.model.path.c_str());
+                SRV_ERR("failed to load draft model, '%s'\n", params.llm_params.speculative.draft.mparams.path.c_str());
                 return false;
             }
             llm_vocab_draft  = llama_model_get_vocab(llm_model_draft);
             batch_text_draft = llama_batch_init(int32_t(llama_n_ctx(llm_ctx_draft)), 0, 1);
+            draft_batch_initialized = true;
         }
 
         common_params llm_params = params.llm_params;
         llm_params.n_parallel    = params.llm_params.n_threads_http;
+        if (mtp_enabled) {
+            const int32_t n_outputs_per_seq = 1 + common_speculative_n_max(&llm_params.speculative);
+            const int64_t n_outputs = int64_t(llm_params.n_parallel) * n_outputs_per_seq;
+            llm_params.n_outputs_max = std::max<int32_t>(
+                llm_params.n_outputs_max,
+                std::max<int32_t>(1, std::min<int64_t>(llm_params.n_batch, n_outputs)));
+        }
         llm_init                 = common_init_from_params(llm_params);
-        llm_model                = llm_init.model.get();
-        llm_ctx                  = llm_init.context.get();
+        llm_model                = llm_init ? llm_init->model() : nullptr;
+        llm_ctx                  = llm_init ? llm_init->context() : nullptr;
         if (llm_model == nullptr) {
             SRV_ERR("failed to load model, '%s'\n", params.llm_params.model.path.c_str());
             return false;
@@ -2819,6 +2837,29 @@ struct httpserver {
         batch_view_max       = int32_t(llama_n_batch(llm_ctx));
         batch_text           = llama_batch_init(llm_ctx_size, 0, 1);
         batch_text_temp      = llama_batch_init(llm_ctx_size, 0, 1);
+
+        if (mtp_enabled) {
+            common_params llm_params_mtp = common_base_params_to_speculative(llm_params);
+            try {
+                spec_init       = common_speculative_init_from_params(llm_params_mtp, llm_model, llm_ctx);
+                llm_ctx_draft   = spec_init ? spec_init->context() : nullptr;
+                if (llm_ctx_draft == nullptr) {
+                    SRV_ERR("failed to create MTP context for model, '%s'\n", params.llm_params.model.path.c_str());
+                    return false;
+                }
+
+                llm_params_mtp.speculative.draft.ctx_tgt = llm_ctx;
+                llm_params_mtp.speculative.draft.ctx_dft = llm_ctx_draft;
+                spec.reset(common_speculative_init(llm_params_mtp.speculative, llm_params.n_parallel));
+                if (!spec) {
+                    SRV_ERR("%s", "failed to initialize MTP speculative decoding context\n");
+                    return false;
+                }
+            } catch (const std::exception & e) {
+                SRV_ERR("failed to initialize MTP speculative decoding context: %s\n", e.what());
+                return false;
+            }
+        }
 
         // check multimodal projection model compatibility if needed
         if (llm_ctx_clip_v != nullptr || llm_ctx_clip_a != nullptr) {
@@ -2932,9 +2973,8 @@ struct httpserver {
         {
             chat_templates = common_chat_templates_init(llm_model, params.llm_params.chat_template);
 
-            const auto * source = common_chat_templates_source(chat_templates.get());
-            // NB(thxCode): llama_chat_template_alias is a patch.
-            std::string  alias  = llama_chat_template_alias(source);
+            const std::string source = common_chat_templates_source(chat_templates.get());
+            std::string       alias  = llama_chat_template_alias(source.c_str());
 
             if (params.llm_params.use_jinja) {
                 // NB(thxCode): common_chat_templates_supports_tool_calls is a patch.
@@ -3060,7 +3100,7 @@ struct httpserver {
                     reasoning_end_word   = "<|start|>assistant<|channel|>final<|message|>";
                 }
                 support_reasoning =
-                    !(string_starts_with(llm_model_arch_name, "qwen3") && params.llm_params.reasoning_budget == 0) &&
+                    !(string_starts_with(llm_model_arch_name, "qwen3") && params.llm_params.sampling.reasoning_budget_tokens == 0) &&
                     ((reasoning_start_token != LLAMA_TOKEN_NULL && reasoning_end_token != LLAMA_TOKEN_NULL) ||
                      (!reasoning_start_word.empty() && !reasoning_end_word.empty()));
                 if (!support_reasoning) {
@@ -3097,8 +3137,7 @@ struct httpserver {
                 inputs.tool_choice           = COMMON_CHAT_TOOL_CHOICE_NONE;
                 inputs.add_generation_prompt = true;
                 inputs.use_jinja             = params.llm_params.use_jinja;
-                // NB(thxCode): common_chat_templates_apply2 is a patch.
-                common_chat_params example   = common_chat_templates_apply2(llm_model, chat_templates.get(), inputs);
+                common_chat_params example   = common_chat_templates_apply(chat_templates.get(), inputs);
                 prompt                       = example.prompt;
             }
 
@@ -3114,7 +3153,7 @@ struct httpserver {
                 support_tool_calls ? "supported" : "unsupported",
                 // reasoning
                 support_reasoning                       ? "supported" :
-                params.llm_params.reasoning_budget != 0 ? "unsupported" :
+                params.llm_params.sampling.reasoning_budget_tokens != 0 ? "unsupported" :
                                                           "disabled",
                 prompt.c_str());
             if (support_tool_calls) {
@@ -3348,7 +3387,7 @@ struct httpserver {
     /* LLAMA */
 
     // model
-    common_init_result  llm_init;
+    common_init_result_ptr llm_init;
     llama_model *       llm_model             = nullptr;
     llama_context *     llm_ctx               = nullptr;
     const llama_vocab * llm_vocab             = nullptr;
@@ -3395,11 +3434,15 @@ struct httpserver {
     std::unordered_map<std::string, cache_multimodal_entry> cache_multimodals;
 
     // speculative decoding
-    common_init_result  llm_init_draft;
+    common_init_result_ptr llm_init_draft;
     llama_model *       llm_model_draft  = nullptr;
     llama_context *     llm_ctx_draft    = nullptr;
     const llama_vocab * llm_vocab_draft  = nullptr;
     llama_batch         batch_text_draft = {};
+    bool                 draft_batch_initialized = false;
+    bool                 mtp_enabled             = false;
+    common_speculative_init_result_ptr spec_init;
+    common_speculative_ptr              spec;
 
     // thread pool
     ggml_backend_reg_t reg_cpu          = nullptr;
@@ -3614,6 +3657,12 @@ struct httpserver {
                 // decode again
                 decoded = llama_decode(input_ctx, input_batch_view);
             }
+            if (decoded == 0 && spec != nullptr && input_ctx == llm_ctx && input_batch_view.token != nullptr) {
+                if (!common_speculative_process(spec.get(), input_batch_view)) {
+                    SRV_ERR("%s", "failed to process speculative batch\n");
+                    decoded = -2;
+                }
+            }
             if (decoded != 0) {
                 break;
             }
@@ -3689,7 +3738,7 @@ struct httpserver {
                     }
                     // clean batch for later adding
                     common_batch_clear(batch_text);
-                    if (llm_ctx_draft != nullptr) {
+                    if (draft_batch_initialized) {
                         common_batch_clear(batch_text_draft);
                     }
                 }
@@ -3985,7 +4034,7 @@ struct httpserver {
                             const llama_token tok = tokenized_text[i_text];
                             const bool        emb = i_text + 1 == n_text;
                             common_batch_add(batch_text, tok, task->pos, { seq_id }, emb);
-                            if (llm_ctx_draft != nullptr) {
+                            if (draft_batch_initialized) {
                                 common_batch_add(batch_text_draft, tok, task->pos, { seq_id }, emb);
                             }
                             task->pos++;
@@ -4040,7 +4089,7 @@ struct httpserver {
 
                     // decode next (n_decoded > 0)
                     else if (batch_process_type != PROCESS_PREFILL && task->n_decoded > 0 &&
-                             batch_text.n_tokens + params.llm_params.speculative.n_max < batch_view_max) {
+                             batch_text.n_tokens + params.llm_params.speculative.draft.n_max < batch_view_max) {
                         // token throttling
                         if (task->token_bucket != nullptr) {
                             if (!task->token_bucket->try_acquire()) {
@@ -4236,7 +4285,7 @@ struct httpserver {
                 // speculative - draft
                 // NB(thxCode): we don't need to decode in a loop like above,
                 // as the previous llm_ctx decode also shift the draft kv cache during failure decoding.
-                if (batch_text_draft.n_tokens > 0) {
+                if (draft_batch_initialized && batch_text_draft.n_tokens > 0) {
                     const int32_t decoded_draft =
                         decode_completion_task_batch(llm_ctx_draft, batch_text_draft, batch_task_ptrs);
                     if (decoded_draft != 0) {
@@ -4287,6 +4336,9 @@ struct httpserver {
                     const int32_t     tid    = task->get_id();
                     const std::string rid    = task->get_r_id();
                     const int32_t     seq_id = task->get_seq_id();
+                    if (mtp_enabled && spec != nullptr && task->n_decoded == 0) {
+                        common_speculative_begin(spec.get(), seq_id, task->processed_tokens);
+                    }
                     // sample token
                     //// default
                     if (task->drafted_tokens.empty()) {
@@ -4299,6 +4351,7 @@ struct httpserver {
                     }
                     //// include drafted tokens
                     else {
+                        uint16_t n_drafted_accepted = 0;
                         // +1 for main model decoded token
                         for (int32_t j = 0, s = int32_t(task->drafted_tokens.size()); j < s + 1; ++j) {
                             // greedy verification only
@@ -4329,7 +4382,11 @@ struct httpserver {
                                     break;
                                 }
                                 task->n_drafted_accepted++;
+                                n_drafted_accepted++;
                             }
+                        }
+                        if (mtp_enabled && spec != nullptr) {
+                            common_speculative_accept(spec.get(), seq_id, n_drafted_accepted);
                         }
                     }
                     // speculative - lookup
@@ -4462,7 +4519,7 @@ struct httpserver {
                             if (task->tokenized_prompts_include_tools && task->reasoning_finished) {
                                 //// jinja
                                 if (params.llm_params.use_jinja) {
-                                    if (common_sampler_grammer_lazy_triggered(task->sampler)) {
+                                    if (task->req->sampling.grammar_lazy) {
                                         send_text                 = false;
                                         std::string functions_str = task->generated_text;
                                         if (!functions_str.empty()) {
@@ -4696,7 +4753,29 @@ struct httpserver {
                         if (!task->tokenized_prompts_include_multimedias) {
                             task->drafted_tokens.clear();
                             //// draft
-                            if (llm_ctx_draft != nullptr) {
+                            if (mtp_enabled && spec != nullptr) {
+                                const int32_t n_draft_max = std::min(
+                                    params.llm_params.speculative.draft.n_max,
+                                    std::max(0, task->n_decoding_budget - 1));
+                                if (n_draft_max > 0) {
+                                    common_speculative_get_draft_params(spec.get(), seq_id) = {
+                                        /* .drafting = */ true,
+                                        /* .n_max    = */ n_draft_max,
+                                        /* .n_past   = */ task->pos,
+                                        /* .id_last  = */ task->processed_tokens.back(),
+                                        /* .prompt   = */ &task->processed_tokens,
+                                        /* .result   = */ &task->drafted_tokens,
+                                    };
+                                    common_speculative_draft(spec.get());
+                                    // The MTP draft context is only a staging context for
+                                    // speculative tokens.  Keep its KV cache aligned with
+                                    // the target context before the next target decode; the
+                                    // upstream server performs the same rollback after each
+                                    // draft round.
+                                    llama_memory_seq_rm(llama_get_memory(llm_ctx_draft), seq_id, task->pos, -1);
+                                    task->n_drafted += int32_t(task->drafted_tokens.size());
+                                }
+                            } else if (draft_batch_initialized) {
                                 // clean batch for later adding
                                 common_batch_clear(batch_text_draft);
                                 common_batch_add(batch_text_draft, task->processed_tokens.back(), task->pos, { seq_id },
@@ -4718,12 +4797,12 @@ struct httpserver {
                                     continue;
                                 }
                                 // speculative in n_max times
-                                for (int32_t j = 0; j < params.llm_params.speculative.n_max; ++j) {
+                                for (int32_t j = 0; j < params.llm_params.speculative.draft.n_max; ++j) {
                                     const llama_token tok =
                                         common_sampler_sample2(task->sampler_draft, llm_ctx_draft, 0);
                                     const llama_token_data_array * cur_p =
-                                        common_sampler_get_candidates(task->sampler_draft);
-                                    if (cur_p->data[0].p < params.llm_params.speculative.p_min) {
+                                        common_sampler_get_candidates(task->sampler_draft, true);
+                                    if (cur_p->data[0].p < params.llm_params.speculative.draft.p_min) {
                                         break;
                                     }
                                     common_sampler_accept(task->sampler_draft, tok, true);
@@ -4745,7 +4824,7 @@ struct httpserver {
                                     }
                                 }
                                 // ignore if less than n_min
-                                if (int32_t(task->drafted_tokens.size()) < params.llm_params.speculative.n_min) {
+                                if (int32_t(task->drafted_tokens.size()) < params.llm_params.speculative.draft.n_min) {
                                     task->drafted_tokens.clear();
                                 }
                             }
@@ -4757,7 +4836,7 @@ struct httpserver {
                                 }
                                 common_ngram_cache ngram_cache_empty;
                                 common_ngram_cache_draft(task->processed_tokens, task->drafted_tokens,
-                                                         params.llm_params.speculative.n_max, params.lookup_ngram_min,
+                                                         params.llm_params.speculative.draft.n_max, params.lookup_ngram_min,
                                                          LLAMA_NGRAM_MAX, task->ngram_cache, ngram_cache_empty,
                                                          ngram_cache_empty);
                                 if (n_drafted == 0) {
@@ -5134,13 +5213,14 @@ struct httpserver {
                     SRV_ERR("rid %s | tokenizing, audio clip is not initialized\n", rid);
                     return result;
                 }
-                result = tokenize_audio(llm_ctx_clip_a, params.llm_params.cpuparams.n_threads, mtmd->ptr.get());
+                result = tokenize_audio(llm_ctx_clip_a, params.llm_params.cpuparams.n_threads, mtmd->audio);
             } else {
                 if (llm_ctx_clip_v == nullptr) {
                     SRV_ERR("rid %s | tokenizing, vision clip is not initialized\n", rid);
                     return result;
                 }
-                result = tokenize_image(llm_ctx_clip_v, params.llm_params.cpuparams.n_threads, mtmd->ptr.get());
+                result = tokenize_image(llm_ctx_clip_v, params.llm_params.cpuparams.n_threads, mtmd->ptr.get(),
+                                        params.max_image_size);
             }
             if (common_log_verbosity_thold >= 2) {
                 int32_t n_tokens     = 0;
@@ -5214,13 +5294,14 @@ struct httpserver {
                     SRV_ERR("rid %s | tokenizing, audio clip is not initialized\n", rid);
                     return result;
                 }
-                result = tokenize_audio(llm_ctx_clip_a, params.llm_params.cpuparams.n_threads, mtmd->ptr.get());
+                result = tokenize_audio(llm_ctx_clip_a, params.llm_params.cpuparams.n_threads, mtmd->audio);
             } else {
                 if (llm_ctx_clip_v == nullptr) {
                     SRV_ERR("rid %s | tokenizing, vision clip is not initialized\n", rid);
                     return result;
                 }
-                result = tokenize_image(llm_ctx_clip_v, params.llm_params.cpuparams.n_threads, mtmd->ptr.get());
+                result = tokenize_image(llm_ctx_clip_v, params.llm_params.cpuparams.n_threads, mtmd->ptr.get(),
+                                        params.max_image_size);
             }
             if (common_log_verbosity_thold >= 2) {
                 int32_t n_tokens     = 0;
@@ -5364,12 +5445,12 @@ struct httpserver {
                         { "name", "kv_cache_usage_ratio" },
                         { "help", "KV-cache usage. 1 means 100 percent usage." },
                         { "value",
-                          support_completion() ? double(llama_kv_self_used_cells(llm_ctx)) / llm_ctx_size : 0 },
+                          support_completion() ? double(llama_box_memory_tokens(llm_ctx)) / llm_ctx_size : 0 },
                     },
                     {
                         { "name", "kv_cache_tokens" },
                         { "help", "KV-cache tokens." },
-                        { "value", support_completion() ? llama_kv_self_n_tokens(llm_ctx) : 0 },
+                        { "value", support_completion() ? llama_box_memory_tokens(llm_ctx) : 0 },
                     },
                 }, },
         };
@@ -5531,7 +5612,7 @@ struct httpserver {
                 { "mirostat_eta",                params.llm_params.sampling.mirostat_eta          },
                 { "support_vision",              llm_ctx_clip_v != nullptr                        },
                 { "support_audio",               llm_ctx_clip_a != nullptr                        },
-                { "support_speculative",         llm_ctx_draft != nullptr                         },
+                { "support_speculative",         spec != nullptr || llm_model_draft != nullptr    },
                 { "support_tool_calls",          support_tool_calls                               },
                 { "support_parallel_tool_calls", support_parallel_tool_calls                      },
                 { "support_reasoning",           support_reasoning                                },
@@ -5543,7 +5624,7 @@ struct httpserver {
             {
              "data", {
                     {
-                        { "id", support_image() ? params.sd_params.model_alias : params.llm_params.model_alias },
+                        { "id", support_image() ? params.sd_params.model_alias : common_model_alias_value(params.llm_params) },
                         { "object", "model" },
                         { "created", std::time(nullptr) },
                         { "owned_by", "llama-box" },
@@ -5637,7 +5718,7 @@ struct httpserver {
             if (sampler == nullptr) {
                 return send_json(request, response, httplib::BadRequest_400, "Illegal param: \"sampling\" is invalid");
             }
-            if (llm_ctx_draft != nullptr) {
+            if (draft_batch_initialized) {
                 common_params_sampling sampling_draft = {};
                 sampling_draft.seed                   = req->sampling.seed;
                 sampling_draft.no_perf                = false;
@@ -6087,7 +6168,7 @@ struct httpserver {
             if (sampler == nullptr) {
                 return send_json(request, response, httplib::BadRequest_400, "Illegal param: \"sampling\" is invalid");
             }
-            if (llm_ctx_draft != nullptr) {
+            if (draft_batch_initialized) {
                 common_params_sampling sampling_draft;
                 sampling_draft.seed     = req->sampling.seed;
                 sampling_draft.no_perf  = false;
