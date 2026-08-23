@@ -10,8 +10,7 @@
 #include "stable-diffusion.cpp/thirdparty/stb_image_resize.h"
 #define STB_IMAGE_WRITE_STATIC
 #define STB_IMAGE_WRITE_IMPLEMENTATION
-#include "stable-diffusion.cpp/model.h"
-#include "stable-diffusion.cpp/stable-diffusion.h"
+#include "stable-diffusion.cpp/include/stable-diffusion.h"
 #include "stable-diffusion.cpp/thirdparty/stb_image_write.h"
 
 #define SELF_PACKAGE 0
@@ -121,12 +120,9 @@ struct stablediffusion_sampling_stream {
 
     ~stablediffusion_sampling_stream() {
         if (images != nullptr) {
-            if (images[0].data != nullptr) {
-                free(images[0].data);
-                images[0].data = nullptr;
-            }
-            free(images);
+            free_sd_images(images, num_images);
             images = nullptr;
+            num_images = 0;
         }
     }
 
@@ -135,6 +131,7 @@ struct stablediffusion_sampling_stream {
     std::vector<std::string>       lora_paths;
     std::vector<sd_lora_t>          loras;
     sd_image_t *                    images  = nullptr;
+    int                             num_images = 0;
     int                             steps   = 0;
     bool                            sampled = false;
     bool                            failed  = false;
@@ -175,8 +172,6 @@ class stablediffusion_context {
                                                                      stablediffusion_params_sampling sparams);
     bool                                             sample_stream(stablediffusion_sampling_stream * stream);
     std::pair<int, int>                              progress_stream(stablediffusion_sampling_stream * stream);
-    std::unique_ptr<stablediffusion_generated_image> preview_image_stream(stablediffusion_sampling_stream * stream,
-                                                                          bool faster = false);
     std::unique_ptr<stablediffusion_generated_image> result_image_stream(stablediffusion_sampling_stream * stream);
 
   private:
@@ -199,7 +194,9 @@ stablediffusion_context::~stablediffusion_context() {
 }
 
 float stablediffusion_context::get_default_strength() {
-    return 0.75f;
+    sd_model_defaults_t defaults{};
+    sd_get_model_defaults(sd_ctx, &defaults);
+    return defaults.strength;
 }
 
 sample_method_t stablediffusion_context::get_default_sample_method() {
@@ -211,15 +208,21 @@ sample_method_t stablediffusion_context::get_default_sample_method() {
 }
 
 int stablediffusion_context::get_default_sampling_steps() {
-    return params.llm_model.empty() ? 20 : 40;
+    sd_model_defaults_t defaults{};
+    sd_get_model_defaults(sd_ctx, &defaults);
+    return defaults.sampling_steps;
 }
 
 float stablediffusion_context::get_default_cfg_scale() {
-    return params.llm_model.empty() ? 4.5f : 2.5f;
+    sd_model_defaults_t defaults{};
+    sd_get_model_defaults(sd_ctx, &defaults);
+    return defaults.cfg_scale;
 }
 
 std::pair<int, int> stablediffusion_context::get_default_image_size() {
-    return { 1024, 1024 };
+    sd_model_defaults_t defaults{};
+    sd_get_model_defaults(sd_ctx, &defaults);
+    return { defaults.height, defaults.width };
 }
 
 void stablediffusion_context::apply_lora_adapters(std::vector<common_adapter_lora_info> & lora_adapters) {
@@ -275,6 +278,7 @@ bool stablediffusion_context::sample_stream(stablediffusion_sampling_stream * st
     generation.sample_params.guidance.slg.layer_end = stream->params.slg_end;
     generation.sample_params.guidance.slg.layers = stream->params.slg_skip_layers.data();
     generation.sample_params.guidance.slg.layer_count = stream->params.slg_skip_layers.size();
+    generation.sample_params.flow_shift = params.llm_model.empty() ? INFINITY : params.flow_shift;
     generation.control_strength = stream->params.control_strength;
     generation.vae_tiling_params.enabled = params.vae_tiling;
 
@@ -288,8 +292,7 @@ bool stablediffusion_context::sample_stream(stablediffusion_sampling_stream * st
     if (!params.llm_model.empty() && input_image.data != nullptr) {
         generation.ref_images = &input_image;
         generation.ref_images_count = 1;
-        generation.auto_resize_ref_image = true;
-        generation.increase_ref_index = false;
+        generation.ref_image_args = "resize_before_vae=true,ref_index_mode=fixed";
     } else {
         generation.init_image = input_image;
         generation.mask_image = mask_image;
@@ -298,10 +301,11 @@ bool stablediffusion_context::sample_stream(stablediffusion_sampling_stream * st
         generation.control_image = control_image;
     }
 
-    stream->images = generate_image(sd_ctx, &generation);
+    const bool generated = generate_image(sd_ctx, &generation, &stream->images, &stream->num_images);
     stream->steps = generation.sample_params.sample_steps > 0 ? generation.sample_params.sample_steps : 1;
     stream->sampled = true;
-    stream->failed = stream->images == nullptr || stream->images[0].data == nullptr;
+    stream->failed = !generated || stream->images == nullptr || stream->num_images <= 0 ||
+                    stream->images[0].data == nullptr;
     return false;
 }
 
@@ -313,34 +317,16 @@ std::pair<int, int> stablediffusion_context::progress_stream(stablediffusion_sam
     return { stream->sampled ? stream->steps : 0, stream->steps };
 }
 
-std::unique_ptr<stablediffusion_generated_image> stablediffusion_context::preview_image_stream(
-    stablediffusion_sampling_stream * stream, bool faster) {
-    if (stream == nullptr || !stream->sampled || stream->failed || stream->images == nullptr) {
-        return nullptr;
-    }
-
-    sd_image_t img = stream->images[0];
-    if (img.data == nullptr) {
-        return nullptr;
-    }
-
-    int             size = 0;
-    unsigned char * data = stbi_write_png_to_mem((stbi_uc *) img.data, 0, (int) img.width, (int) img.height,
-                                                 (int) img.channel, &size, nullptr);
-    if (data == nullptr || size <= 0) {
-        return nullptr;
-    }
-
-    return std::make_unique<stablediffusion_generated_image>(size, data);
-}
-
 std::unique_ptr<stablediffusion_generated_image> stablediffusion_context::result_image_stream(
     stablediffusion_sampling_stream * stream) {
     if (stream == nullptr || !stream->sampled || stream->failed || stream->images == nullptr) {
         return nullptr;
     }
 
-    sd_image_t img = stream->images[0];
+    sd_image_t * owned_images = stream->images;
+    int           owned_count = stream->num_images;
+    bool          owned_by_stream = true;
+    sd_image_t    img = owned_images[0];
     if (img.data == nullptr) {
         return nullptr;
     }
@@ -348,16 +334,28 @@ std::unique_ptr<stablediffusion_generated_image> stablediffusion_context::result
     int upscale_factor = 4;
     if (upscaler_ctx != nullptr && params.upscale_repeats > 0) {
         for (int u = 0; u < params.upscale_repeats; ++u) {
-            sd_image_t upscaled_img = upscale(upscaler_ctx, img, upscale_factor);
-            if (upscaled_img.data == nullptr) {
+            sd_image_t * upscaled_images = nullptr;
+            int          upscaled_count = 0;
+            const bool   upscaled = upscale(upscaler_ctx, img, upscale_factor,
+                                            &upscaled_images, &upscaled_count);
+            if (!upscaled || upscaled_count <= 0 || upscaled_images == nullptr ||
+                upscaled_images[0].data == nullptr) {
+                free_sd_images(upscaled_images, upscaled_count);
                 LOG_WRN("%s: failed to upscale image\n", __func__);
                 break;
             }
-            stbi_image_free(img.data);
-            if (img.data == stream->images[0].data) {
-                stream->images[0].data = nullptr;
+
+            if (owned_by_stream) {
+                free_sd_images(stream->images, stream->num_images);
+                stream->images = nullptr;
+                stream->num_images = 0;
+            } else {
+                free_sd_images(owned_images, owned_count);
             }
-            img = upscaled_img;
+            owned_images = upscaled_images;
+            owned_count = upscaled_count;
+            owned_by_stream = false;
+            img = owned_images[0];
         }
     }
 
@@ -365,14 +363,14 @@ std::unique_ptr<stablediffusion_generated_image> stablediffusion_context::result
     unsigned char * data  = stbi_write_png_to_mem((stbi_uc *) img.data, 0, (int) img.width, (int) img.height,
                                                   (int) img.channel, &size, nullptr);
     if (data == nullptr || size <= 0) {
-        if (img.data != stream->images[0].data) {
-            stbi_image_free(img.data);
+        if (!owned_by_stream) {
+            free_sd_images(owned_images, owned_count);
         }
         return nullptr;
     }
 
-    if (img.data != stream->images[0].data) {
-        stbi_image_free(img.data);
+    if (!owned_by_stream) {
+        free_sd_images(owned_images, owned_count);
     }
 
     return std::make_unique<stablediffusion_generated_image>(size, data);
@@ -385,6 +383,30 @@ struct common_sd_init_result {
 common_sd_init_result common_sd_init_from_params(stablediffusion_params params) {
     common_sd_init_result result;
 
+    std::string backend_spec;
+    std::string params_backend_spec;
+    std::string model_args;
+
+    auto prepend_backend_assignment = [](std::string & spec, const char * assignment) {
+        if (!spec.empty()) {
+            spec.insert(0, ",");
+        }
+        spec.insert(0, assignment);
+    };
+
+    if (params.vae_model_offload) {
+        prepend_backend_assignment(backend_spec, "vae=cpu");
+    }
+    if (params.control_model_offload) {
+        prepend_backend_assignment(backend_spec, "controlnet=cpu");
+    }
+    if (params.text_encoder_model_offload) {
+        params_backend_spec = "*=cpu";
+    }
+    if (params.qwen_image_zero_cond_t) {
+        model_args = "qwen_image_zero_cond_t=true";
+    }
+
     sd_ctx_params_t ctx_params;
     sd_ctx_params_init(&ctx_params);
     ctx_params.diffusion_model_path = params.model.c_str();
@@ -396,17 +418,13 @@ common_sd_init_result common_sd_init_from_params(stablediffusion_params params) 
     ctx_params.vae_path = params.vae_model.c_str();
     ctx_params.taesd_path = params.taesd_model.c_str();
     ctx_params.control_net_path = params.control_net_model.c_str();
-    ctx_params.vae_decode_only = false;
-    ctx_params.free_params_immediately = false;
     ctx_params.n_threads = params.n_threads;
     ctx_params.rng_type = CUDA_RNG;
     ctx_params.sampler_rng_type = RNG_TYPE_COUNT;
-    ctx_params.offload_params_to_cpu = params.text_encoder_model_offload;
-    ctx_params.keep_control_net_on_cpu = params.control_model_offload;
-    ctx_params.keep_vae_on_cpu = params.vae_model_offload;
+    ctx_params.backend = backend_spec.empty() ? nullptr : backend_spec.c_str();
+    ctx_params.params_backend = params_backend_spec.empty() ? nullptr : params_backend_spec.c_str();
+    ctx_params.model_args = model_args.empty() ? nullptr : model_args.c_str();
     ctx_params.diffusion_flash_attn = params.flash_attn;
-    ctx_params.qwen_image_zero_cond_t = params.qwen_image_zero_cond_t;
-    ctx_params.flow_shift = params.llm_model.empty() ? INFINITY : params.flow_shift;
 
     sd_ctx_t * sd_ctx = new_sd_ctx(&ctx_params);
     if (sd_ctx == nullptr) {
@@ -416,8 +434,8 @@ common_sd_init_result common_sd_init_from_params(stablediffusion_params params) 
 
     upscaler_ctx_t * upscaler_ctx = nullptr;
     if (!params.upscale_model.empty()) {
-        upscaler_ctx = new_upscaler_ctx(params.upscale_model.c_str(), params.vae_model_offload, false,
-                                        params.n_threads, 128);
+        upscaler_ctx = new_upscaler_ctx(params.upscale_model.c_str(), false, params.n_threads, 128,
+                                        ctx_params.backend, ctx_params.params_backend);
         if (upscaler_ctx == nullptr) {
             LOG_ERR("%s: failed to create upscaler context\n", __func__);
             free_sd_ctx(sd_ctx);

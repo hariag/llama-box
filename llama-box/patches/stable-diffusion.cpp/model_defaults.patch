@@ -1,0 +1,100 @@
+diff --git a/include/stable-diffusion.h b/include/stable-diffusion.h
+--- a/include/stable-diffusion.h
++++ b/include/stable-diffusion.h
+@@ -486,6 +486,16 @@ SD_API enum sample_method_t sd_get_default_sample_method(const sd_ctx_t* sd_ctx);
+ SD_API enum sample_method_t sd_get_default_sample_method(const sd_ctx_t* sd_ctx);
+ SD_API enum scheduler_t sd_get_default_scheduler(const sd_ctx_t* sd_ctx, enum sample_method_t sample_method);
+ 
++typedef struct sd_model_defaults_t {
++    float   strength;
++    int32_t sampling_steps;
++    float   cfg_scale;
++    int32_t width;
++    int32_t height;
++} sd_model_defaults_t;
++
++SD_API void sd_get_model_defaults(const sd_ctx_t* sd_ctx, sd_model_defaults_t* defaults);
++
+ SD_API void sd_img_gen_params_init(sd_img_gen_params_t* sd_img_gen_params);
+ SD_API char* sd_img_gen_params_to_str(const sd_img_gen_params_t* sd_img_gen_params);
+ SD_API bool generate_image(sd_ctx_t* sd_ctx,
+                            const sd_img_gen_params_t* sd_img_gen_params,
+                            sd_image_t** images_out,
+                            int* num_images_out);
+diff --git a/src/stable-diffusion.cpp b/src/stable-diffusion.cpp
+--- a/src/stable-diffusion.cpp
++++ b/src/stable-diffusion.cpp
+@@ -3977,4 +3977,73 @@ enum scheduler_t sd_get_default_scheduler(const sd_ctx_t* sd_ctx, enum sample_method_t sample_method)
+     return DISCRETE_SCHEDULER;
+ }
+ 
++void sd_get_model_defaults(const sd_ctx_t* sd_ctx, sd_model_defaults_t* defaults) {
++    if (defaults == nullptr) {
++        return;
++    }
++
++    *defaults = {};
++    defaults->strength        = 0.75f;
++    defaults->sampling_steps = 20;
++    defaults->cfg_scale      = 4.5f;
++    defaults->width          = 1024;
++    defaults->height         = 1024;
++
++    if (sd_ctx == nullptr || sd_ctx->sd == nullptr) {
++        return;
++    }
++
++    const SDVersion version = sd_ctx->sd->version;
++    if (sd_version_is_qwen_image(version)) {
++        defaults->sampling_steps = 40;
++        defaults->cfg_scale      = 2.5f;
++        return;
++    }
++
++    switch (version) {
++        case VERSION_SD1_INPAINT:
++        case VERSION_SD2_INPAINT:
++        case VERSION_SDXL_INPAINT:
++        case VERSION_FLUX_FILL:
++            defaults->strength = 1.0f;
++            defaults->sampling_steps = 50;
++            break;
++        default:
++            break;
++    }
++
++    switch (version) {
++        case VERSION_SD1:
++        case VERSION_SD1_INPAINT:
++        case VERSION_SD2:
++        case VERSION_SD2_INPAINT:
++            defaults->cfg_scale = 9.0f;
++            defaults->width = 512;
++            defaults->height = 512;
++            break;
++        case VERSION_SDXL_INPAINT:
++            defaults->cfg_scale = 5.0f;
++            defaults->width = 512;
++            defaults->height = 512;
++            break;
++        case VERSION_SDXL:
++        case VERSION_SDXL_PIX2PIX:
++        case VERSION_SDXL_SSD1B:
++            defaults->cfg_scale = 5.0f;
++            defaults->sampling_steps = 25;
++            break;
++        case VERSION_SD3:
++            defaults->cfg_scale = 4.5f;
++            break;
++        case VERSION_FLUX:
++            defaults->cfg_scale = 1.0f;
++            break;
++        case VERSION_FLUX_FILL:
++            defaults->cfg_scale = 3.5f;
++            break;
++        default:
++            break;
++    }
++}
++
+ static int64_t resolve_seed(int64_t seed) {

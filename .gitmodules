@@ -3,8 +3,8 @@
 	url = https://github.com/ggml-org/llama.cpp
 [submodule "stable-diffusion.cpp"]
 	path = stable-diffusion.cpp
-	url = https://github.com/thxcode/stable-diffusion.cpp
-	branch = dev-dcf91f9e-5
+	url = https://github.com/hariag/stable-diffusion.cpp
+	branch = master
 [submodule "concurrentqueue"]
 	path = concurrentqueue
 	url = https://github.com/cameron314/concurrentqueue
