@@ -20,12 +20,13 @@
 #include "llama.cpp/common/speculative.h"
 #include "llama.cpp/tools/mtmd/clip.h"
 #include "llama.cpp/vendor/cpp-httplib/httplib.h"
-#include "stable-diffusion.cpp/stable-diffusion.h"
+#include "stable-diffusion.cpp/include/stable-diffusion.h"
 
 #define SELF_PACKAGE 0
 #include "z_multimodal.hpp"
 #include "z_stablediffusion.hpp"
 #include "z_utils.hpp"
+#include "chat_template_request.hpp"
 
 // defines
 
@@ -104,7 +105,8 @@ static inline int32_t send_string(const httplib::Request & request, httplib::Res
 }
 
 // send_event_json, close if given status is not 100.
-static inline int32_t send_event_json(httplib::DataSink & sink, httplib::StatusCode status, json & data) {
+static inline int32_t send_event_json(httplib::DataSink & sink, httplib::StatusCode status, json & data,
+                                      bool send_done = false) {
     if (!sink.is_writable()) {
         return httplib::RequestTimeout_408;
     }
@@ -124,6 +126,10 @@ static inline int32_t send_event_json(httplib::DataSink & sink, httplib::StatusC
     const std::string str = event + ": " + message + "\n\n";
     sink.write(str.c_str(), str.size());
     if (status != httplib::Continue_100) {
+        if (send_done && sink.is_writable()) {
+            const std::string done = "data: [DONE]\n\n";
+            sink.write(done.c_str(), done.size());
+        }
         sink.done();
     }
     return httplib::OK_200;
@@ -207,7 +213,8 @@ static inline common_params_sampling prepare_sampling(const json & data, const c
     if (data.contains("json_schema") && !data.contains("grammar")) {
         try {
             json schema    = json_value(data, "json_schema", json::object());
-            params.grammar = { COMMON_GRAMMAR_TYPE_OUTPUT_FORMAT, json_schema_to_grammar(schema) };
+            params.grammar = { COMMON_GRAMMAR_TYPE_OUTPUT_FORMAT,
+                               json_schema_to_grammar(common_json::parse(schema.dump())) };
         } catch (const std::exception & e) {
             throw std::invalid_argument("Illegal param: \"json_schema\": " + std::string(e.what()));
         }
@@ -882,6 +889,7 @@ struct chat_complete_req : complete_req {
     std::vector<std::unique_ptr<clip_multimedia>> multimedias;  // images and audios
     // template
     common_chat_params                            chat_params;
+    bool                                           enable_thinking = true;
 
     /* OPEN AI*/
 
@@ -972,6 +980,7 @@ static inline std::unique_ptr<chat_complete_req> get_chat_complete_req(
         json messages = req.at("messages");
         for (const json & msg : messages) {
             std::string role = json_value(msg, "role", std::string());
+            std::string reasoning_content = llama_box_parse_message_reasoning_content(msg);
             std::string content;
             // content
             if (msg.contains("content") && !msg.at("content").is_null()) {
@@ -1117,7 +1126,7 @@ static inline std::unique_ptr<chat_complete_req> get_chat_complete_req(
                 else {
                     throw std::invalid_argument("Illegal param: invalid \"content\"");
                 }
-                ptr->messages.push_back({ role, content, {}, {}, "", "", "" });
+                ptr->messages.push_back({ role, content, {}, {}, reasoning_content, "", "" });
             }
             // tool_calls
             else if (msg.contains("tool_calls") && !msg.at("tool_calls").is_null()) {
@@ -1146,7 +1155,7 @@ static inline std::unique_ptr<chat_complete_req> get_chat_complete_req(
                         }
                         chat_tcs.push_back(chat_tc);
                     }
-                    ptr->messages.push_back({ role, "", {}, chat_tcs, "", "", "" });
+                    ptr->messages.push_back({ role, "", {}, chat_tcs, reasoning_content, "", "" });
                 }
                 // illegal
                 else {
@@ -1308,7 +1317,9 @@ static inline std::unique_ptr<chat_complete_req> get_chat_complete_req(
                     const json &      fc = tc.at("function");
                     const std::string fn = json_value(fc, "name", std::string());
                     ptr->tools.erase(std::remove_if(ptr->tools.begin(), ptr->tools.end(),
-                                                    [fn](const common_chat_tool & t) { return t.name == fn; }),
+                                                    [fn](const common_chat_tool & t) {
+                                                        return !llama_box_tool_matches_choice(t.name, fn);
+                                                    }),
                                      ptr->tools.end());
                     ptr->tool_choice =
                         ptr->tools.empty() ? COMMON_CHAT_TOOL_CHOICE_NONE : COMMON_CHAT_TOOL_CHOICE_REQUIRED;
@@ -1318,12 +1329,14 @@ static inline std::unique_ptr<chat_complete_req> get_chat_complete_req(
                     throw std::invalid_argument("Illegal param: \"tool_choice\" must be a string or an object");
                 }
             } else if (req.contains("function_call")) {
-                const json & fc = req.at("function_call");
-                if (fc.is_object()) {
-                    const std::string fn = json_value(fc, "name", std::string());
-                    ptr->tools.erase(std::remove_if(ptr->tools.begin(), ptr->tools.end(),
-                                                    [fn](const common_chat_tool & t) { return t.name == fn; }),
-                                     ptr->tools.end());
+                    const json & fc = req.at("function_call");
+                    if (fc.is_object()) {
+                        const std::string fn = json_value(fc, "name", std::string());
+                        ptr->tools.erase(std::remove_if(ptr->tools.begin(), ptr->tools.end(),
+                                                    [fn](const common_chat_tool & t) {
+                                                        return !llama_box_tool_matches_choice(t.name, fn);
+                                                    }),
+                                         ptr->tools.end());
                     ptr->tool_choice =
                         ptr->tools.empty() ? COMMON_CHAT_TOOL_CHOICE_NONE : COMMON_CHAT_TOOL_CHOICE_REQUIRED;
                 } else if (fc.is_string()) {
@@ -1365,10 +1378,12 @@ static inline std::unique_ptr<chat_complete_req> get_chat_complete_req(
         inputs.add_generation_prompt = json_value(req, "add_generation_prompt", true);
         inputs.use_jinja             = params.use_jinja;
         inputs.parallel_tool_calls   = ptr->parallel_tool_calls;
-        inputs.enable_thinking       = params.sampling.reasoning_budget_tokens != 0;
-        for (const auto & item : params.default_template_kwargs) {
-            inputs.chat_template_kwargs[item.first] = item.second;
-        }
+        inputs.reasoning_format      = params.reasoning_format;
+        const auto request_options = llama_box_parse_chat_template_request_options(
+                req, params.sampling.reasoning_budget_tokens != 0, params.default_template_kwargs);
+        inputs.enable_thinking      = request_options.enable_thinking;
+        inputs.chat_template_kwargs = request_options.template_kwargs;
+        ptr->enable_thinking        = request_options.enable_thinking;
         ptr->chat_params = common_chat_templates_apply(chat_templates, inputs);
         SRV_INFV(3, "rid %s | formatted prompt\n%s\n", rid.c_str(), ptr->chat_params.prompt.c_str());
     };
@@ -2167,6 +2182,7 @@ struct completions_task : btask {
     bool                    reasoning_start_found = false;
     bool                    reasoning_end_found   = false;
     bool                    reasoning_finished    = false;
+    llama_box_reasoning_transition_filter reasoning_transition_filter;
     //// tool call
     bool                    tool_call_stop_fast   = false;  // collect from request
     ////// non-jinja too calls
@@ -2539,7 +2555,7 @@ struct images_task : btask {
     double  t_reversed      = 0;  // indicate the time(ms) spent on reversing
     double  p_reversed_sps  = 0;
 
-    json to_json(const int32_t seq) {
+    json to_json(const int32_t seq, const bool copy_b64 = false) {
         bool all_seqs      = seq < 0;
         bool stop          = all_seqs || progress_steps[seq] == progressed_steps[seq];
         bool include_usage = stop && json_value(req->stream_options, "include_usage", true) &&
@@ -2563,6 +2579,7 @@ struct images_task : btask {
             if (!all_seqs && idx != seq) {
                 continue;
             }
+            std::string b64_json = copy_b64 ? b64_jsons[idx] : std::move(b64_jsons[idx]);
             json item = {
                 { "index",            idx                                                                          },
                 { "object",           "image"                                                                      },
@@ -2570,7 +2587,7 @@ struct images_task : btask {
                 { "progress_steps",   progress_steps[idx]                                                          },
                 { "progress",         stop ? 100 : float(progressed_steps[idx]) / float(progress_steps[idx]) * 100 },
                 { "finish_reason",    stop ? "stop" : json()                                                       },
-                { "b64_json",         std::move(b64_jsons[idx])                                                    },
+                { "b64_json",         std::move(b64_json)                                                          },
             };
             data.push_back(std::move(item));
             if (!all_seqs) {
@@ -2820,6 +2837,12 @@ struct httpserver {
             llm_params.n_outputs_max = std::max<int32_t>(
                 llm_params.n_outputs_max,
                 std::max<int32_t>(1, std::min<int64_t>(llm_params.n_batch, n_outputs)));
+            // The target context must reserve one output slot for the sampled
+            // token plus every MTP draft token in the same sequence.  The
+            // upstream server sets both limits; leaving the per-sequence
+            // value at its default (1) makes speculative verification read
+            // the wrong logits when tools are present in the prompt.
+            llm_params.n_outputs_max_per_seq = std::max(llm_params.n_outputs_max_per_seq, n_outputs_per_seq);
         }
         llm_init                 = common_init_from_params(llm_params);
         llm_model                = llm_init ? llm_init->model() : nullptr;
@@ -2989,10 +3012,9 @@ struct httpserver {
             std::string       alias  = llama_chat_template_alias(source.c_str());
 
             if (params.llm_params.use_jinja) {
-                // NB(thxCode): common_chat_templates_supports_tool_calls is a patch.
-                support_tool_calls          = common_chat_templates_supports_tool_calls(chat_templates.get());
-                // NB(thxCode): common_chat_templates_supports_parallel_tool_calls is a patch.
-                support_parallel_tool_calls = common_chat_templates_supports_parallel_tool_calls(chat_templates.get());
+                const auto caps = common_chat_templates_get_caps(chat_templates.get());
+                support_tool_calls          = caps.at("supports_tool_calls");
+                support_parallel_tool_calls = caps.at("supports_parallel_tool_calls");
             } else {
                 bool get_token = false;
                 // chatml / chatglm4
@@ -3196,7 +3218,7 @@ struct httpserver {
                     break;
                 }
                 n_check_decoded++;
-                const int32_t id = common_sampler_sample2(check_smpl, llm_ctx, 0);
+                const int32_t id = common_sampler_sample(check_smpl, llm_ctx, 0, false);
                 if (llama_vocab_is_eog(llm_vocab, id)) {
                     break;
                 }
@@ -4379,7 +4401,7 @@ struct httpserver {
                     //// default
                     if (task->drafted_tokens.empty()) {
                         const int32_t     tok_idx = task->i_batch_seq_end;
-                        const llama_token tok     = common_sampler_sample2(task->sampler, llm_ctx, tok_idx);
+                        const llama_token tok     = common_sampler_sample(task->sampler, llm_ctx, tok_idx, false);
                         common_sampler_accept(task->sampler, tok, true);
                         task->push_generated_token(llm_ctx, tok_idx, tok);
                         task->n_decoded++;
@@ -4392,7 +4414,7 @@ struct httpserver {
                         for (int32_t j = 0, s = int32_t(task->drafted_tokens.size()); j < s + 1; ++j) {
                             // greedy verification only
                             const int32_t     tok_idx = task->i_batch_seq_end - s + j;
-                            const llama_token tok     = common_sampler_sample2(task->sampler, llm_ctx, tok_idx);
+                            const llama_token tok     = common_sampler_sample(task->sampler, llm_ctx, tok_idx, false);
                             common_sampler_accept(task->sampler, tok, true);
                             task->push_generated_token(llm_ctx, tok_idx, tok);
                             task->n_decoded++;
@@ -4443,8 +4465,19 @@ struct httpserver {
                         const int32_t n_generated_tokens_s = task->n_processed_detokenized;
                         const int32_t n_generated_tokens_e = int32_t(task->processed_tokens.size());
                         std::string   sampled_str;
+                        bool          sampled_eog = false;
                         for (; task->n_processed_detokenized < n_generated_tokens_e; task->n_processed_detokenized++) {
                             llama_token tok = task->processed_tokens[task->n_processed_detokenized];
+                            // MTP verifies several tokens in one target batch.  An EOG token can
+                            // therefore be followed by already-computed tokens in the same batch.
+                            // The upstream server feeds accepted tokens to process_token one by
+                            // one and stops at the first EOG; never expose or inspect tokens after
+                            // that boundary.
+                            if (llama_vocab_is_eog(llm_vocab, tok)) {
+                                sampled_eog = true;
+                                task->n_processed_detokenized++;
+                                break;
+                            }
                             // accept special token
                             bool        special =
                                 params.llm_params.special || task->req->sampling.preserved_tokens.find(tok) !=
@@ -4475,6 +4508,7 @@ struct httpserver {
                                         if (task->reasoning_end_found) {
                                             // ignore reasoning end content if needed
                                             if (!reasoning_in_content) {
+                                                task->reasoning_transition_filter.begin(task->n_decoded);
                                                 continue;
                                             }
                                         }
@@ -4482,6 +4516,19 @@ struct httpserver {
                                 }
                                 // finish
                                 else if (!task->reasoning_finished) {
+                                    const std::string transition_piece =
+                                        common_token_to_piece(llm_ctx, tok, special);
+                                    if (task->reasoning_transition_filter.is_delimiter_whitespace(
+                                            transition_piece)) {
+                                        task->reasoning_transition_filter.consume(transition_piece);
+                                        continue;
+                                    }
+                                    if (task->reasoning_transition_filter.in_same_batch(task->n_decoded)) {
+                                        break;
+                                    }
+                                    if (task->reasoning_transition_filter.transition_ready(task->n_decoded)) {
+                                        task->reasoning_transition_filter.complete();
+                                    }
                                     task->reasoning_finished = true;
                                     // avoid to remember the thinking content
                                     if (!task->is_stream() && !reasoning_in_content) {
@@ -4491,7 +4538,13 @@ struct httpserver {
                                     }
                                 }
                             }
-                            sampled_str += common_token_to_piece(llm_ctx, tok, special);
+                            sampled_str += task->reasoning_transition_filter.consume(
+                                common_token_to_piece(llm_ctx, tok, special));
+                        }
+                        if (sampled_eog) {
+                            // The request is terminal.  The remaining tokens were verified in the
+                            // same MTP batch but are semantically after EOG and must be ignored.
+                            task->n_processed_detokenized = n_generated_tokens_e;
                         }
                         task->generated_text += sampled_str;
                         send_text = get_position_of_utf8(task->generated_text) == task->generated_text.size();
@@ -4542,9 +4595,10 @@ struct httpserver {
                                     if (task->reasoning_end_found) {
                                         // ignore reasoning end content if needed
                                         if (!reasoning_in_content) {
+                                            task->reasoning_transition_filter.begin();
                                             size_t pos = task->generated_text.rfind(reasoning_end_word);
                                             task->generated_text_keep_pos = pos;
-                                            task->generated_text          = task->generated_text.erase(pos);
+                                            task->generated_text = task->generated_text.erase(pos);
                                         }
                                     } else {
                                         send_text = reasoning_end_word.find(sampled_str) == std::string::npos;
@@ -4555,33 +4609,49 @@ struct httpserver {
                             if (task->tokenized_prompts_include_tools && task->reasoning_finished) {
                                 //// jinja
                                 if (params.llm_params.use_jinja) {
-                                    if (task->req->sampling.grammar_lazy) {
-                                        send_text                 = false;
-                                        std::string functions_str = task->generated_text;
-                                        if (!functions_str.empty()) {
-                                            try {
-                                                common_chat_msg msg = common_chat_parse(functions_str, false,
-                                                                                        task->tokenized_prompts_syntax);
-                                                if (!msg.tool_calls.empty()) {
-                                                    for (const common_chat_tool_call & tc : msg.tool_calls) {
-                                                        task->generated_tool_calls.push_back({
-                                                            { "type",     "function"                                },
-                                                            { "function",
-                                                             { { "name", tc.name }, { "arguments", tc.arguments } } },
-                                                            { "id",       tc.id.empty() ? gen_call_id() : tc.id     },
-                                                        });
+                                    const bool has_tool_envelope = llama_box_jinja_tool_call_has_envelope(
+                                        task->generated_text);
+                                    if (has_tool_envelope) {
+                                        // Keep XML control tokens out of the
+                                        // response while the model is still
+                                        // emitting them.  Do not parse the
+                                        // partial AST: common_chat_parse(...,
+                                        // false, ...) is intentionally a full
+                                        // parse and a partial result can
+                                        // contain only "{" for arguments.
+                                        send_text = false;
+                                        if (llama_box_jinja_tool_call_is_complete(task->generated_text)) {
+                                            std::string functions_str = task->generated_text;
+                                            if (!functions_str.empty()) {
+                                                try {
+                                                    common_chat_msg msg = common_chat_parse(functions_str, false,
+                                                                                            task->tokenized_prompts_syntax);
+                                                    if (!msg.tool_calls.empty()) {
+                                                        for (const common_chat_tool_call & tc : msg.tool_calls) {
+                                                            task->generated_tool_calls.push_back({
+                                                                { "type",     "function"                                },
+                                                                { "function",
+                                                                 { { "name", tc.name }, { "arguments", tc.arguments } } },
+                                                                { "id",       tc.id.empty() ? gen_call_id() : tc.id     },
+                                                            });
+                                                        }
+                                                        if (task->tool_call_stop_fast) {
+                                                            SRV_DBG("rid %s | stopped by tool call\n", rid.c_str());
+                                                            task->generated_finish_reason =
+                                                                "tool_calls";  // send_text = true;
+                                                        }
+                                                        // eat the rest of the text
+                                                        task->generated_text_keep_pos = std::string::npos;
+                                                        task->generated_text.clear();
                                                     }
-                                                    if (task->tool_call_stop_fast) {
-                                                        SRV_DBG("rid %s | stopped by tool call\n", rid.c_str());
-                                                        task->generated_finish_reason =
-                                                            "tool_calls";  // send_text = true;
-                                                    }
-                                                    // eat the rest of the text
-                                                    task->generated_text_keep_pos = std::string::npos;
-                                                    task->generated_text.clear();
+                                                } catch (const std::exception & e) {
+                                                    // Preserve malformed model
+                                                    // output instead of hanging
+                                                    // the request with send_text
+                                                    // permanently disabled.
+                                                    send_text = true;
+                                                    task->generated_text_keep_pos = 0;
                                                 }
-                                            } catch (const std::exception & e) {
-                                                task->generated_text_keep_pos = 0;
                                             }
                                         }
                                     }
@@ -4758,7 +4828,7 @@ struct httpserver {
                         //// check eog or budget
                         if (task->generated_finish_reason.empty()) {
                             // end of generation
-                            if (llama_vocab_is_eog(llm_vocab, task->processed_tokens.back())) {
+                            if (sampled_eog) {
                                 if (task->generated_tool_calls.empty()) {
                                     SRV_DBG("rid %s | stopped by EOG\n", rid.c_str());
                                     task->generated_finish_reason = "stop";
@@ -4835,7 +4905,7 @@ struct httpserver {
                                 // speculative in n_max times
                                 for (int32_t j = 0; j < params.llm_params.speculative.draft.n_max; ++j) {
                                     const llama_token tok =
-                                        common_sampler_sample2(task->sampler_draft, llm_ctx_draft, 0);
+                                        common_sampler_sample(task->sampler_draft, llm_ctx_draft, 0, false);
                                     const llama_token_data_array * cur_p =
                                         common_sampler_get_candidates(task->sampler_draft, true);
                                     if (cur_p->data[0].p < params.llm_params.speculative.draft.p_min) {
@@ -5075,14 +5145,6 @@ struct httpserver {
                 if (incomplete) {
                     // stream outputting
                     if (task->is_stream()) {
-                        // get preview image
-                        if (preview) {
-                            auto        preview_img = sd_ctx->preview_image_stream(stream, true);
-                            if (preview_img != nullptr) {
-                                std::string b64_json = encode_base64(preview_img->data, preview_img->size);
-                                task->b64_jsons[n]   = std::move(b64_json);
-                            }
-                        }
                         json data = task->to_json(n);
                         process_task_results[tid]->enqueue(
                             std::make_unique<btask_result>(httplib::Continue_100, std::move(data)));
@@ -5100,6 +5162,18 @@ struct httpserver {
                     }
                     std::string b64_json = encode_base64(generated_img->data, generated_img->size);
                     task->b64_jsons[n]   = std::move(b64_json);
+                    // The current Stable Diffusion API performs one-shot
+                    // generation, so there is no intermediate denoising
+                    // state to stream.  Still honor the preview contract by
+                    // emitting the completed image as a preview before the
+                    // final result.  Copying the already encoded payload
+                    // avoids a second PNG encoding pass and keeps the final
+                    // result byte-for-byte identical.
+                    if (task->is_stream() && preview) {
+                        json data = task->to_json(n, true);
+                        process_task_results[tid]->enqueue(
+                            std::make_unique<btask_result>(httplib::Continue_100, std::move(data)));
+                    }
                     // stream outputting, but not the last one
                     if (task->is_stream() && n + 1 < n_repeat) {
                         json data = task->to_json(n);
@@ -5180,7 +5254,8 @@ struct httpserver {
             // output result
             //// completions or embeddings
             if (ttype != TASK_IMAGES) {
-                int32_t status = send_event_json(sink, result_ptr->status, result_ptr->result);
+                int32_t status = send_event_json(sink, result_ptr->status, result_ptr->result,
+                                                 result_ptr->status != httplib::Continue_100);
                 if (status != httplib::OK_200) {
                     SRV_FUNC_ERR("process", "rid %s | failed to send event response, status = %d\n", rid.c_str(),
                                  status);
@@ -6235,16 +6310,22 @@ struct httpserver {
         bool tool_call_stop_fast = !(support_parallel_tool_calls && req->parallel_tool_calls) ||
                                    req->tool_choice == COMMON_CHAT_TOOL_CHOICE_REQUIRED || req->tools.size() <= 1;
 
-        // NB(thxCode): disable reasoning process if we need to generate tool calls in jinja.
-        bool reasoning_finished = !support_reasoning || (params.llm_params.use_jinja &&
-                                                         req->tool_choice == COMMON_CHAT_TOOL_CHOICE_REQUIRED &&
-                                                         tokenized_prompts_include_tools);
+        // Required Jinja tool calls must still pass through the model's
+        // reasoning parser.  Qwen3.8 emits </think> before its XML tool call;
+        // pre-finishing reasoning here leaves both markers in content and
+        // prevents the specialized parser from producing tool_calls.
+        bool reasoning_finished = !support_reasoning || !req->enable_thinking;
 
         std::unique_ptr<completions_task> task =
             std::make_unique<completions_task>(get_task_id(), request.is_connection_closed);
         task->token_bucket                          = std::move(token_bucket);
         task->tokenized_prompts                     = std::move(tokenized_prompts);
         task->tokenized_prompts_syntax.format       = req->chat_params.format;
+        task->tokenized_prompts_syntax.generation_prompt = req->chat_params.generation_prompt;
+        if (!req->chat_params.parser.empty()) {
+            task->tokenized_prompts_syntax.parser.load(req->chat_params.parser);
+        }
+        task->tokenized_prompts_syntax.reasoning_format = params.llm_params.reasoning_format;
         task->tokenized_prompts_include_multimedias = tokenized_prompts_include_multimedias;
         task->tokenized_prompts_include_tools       = tokenized_prompts_include_tools;
         task->n_decoding_budget                     = n_decoding_budget;
@@ -6254,6 +6335,15 @@ struct httpserver {
         task->tool_call_stop_fast                   = tool_call_stop_fast;
         task->cmpl_id                               = gen_chat_completion_id();
         task->reasoning_finished                    = reasoning_finished;
+        if (!reasoning_finished) {
+            const std::string reasoning_end_tag = req->chat_params.thinking_end_tags.empty()
+                ? std::string()
+                : req->chat_params.thinking_end_tags.front();
+            task->reasoning_start_found = llama_box_reasoning_is_prefilled(
+                req->chat_params.generation_prompt,
+                req->chat_params.thinking_start_tag,
+                reasoning_end_tag);
+        }
         task->req                                   = std::move(req);
         task->t_start_prefill                       = ggml_time_us();
 
@@ -6354,7 +6444,6 @@ struct httpserver {
         }
         if (req->normalize) {
             tokenized_inputs.emplace_back(decorate(tokenized_query));
-            // NB(thxCode): llama_vocab_unk is a patch.
             tokenized_inputs.emplace_back(decorate({ llama_vocab_unk(llm_vocab) }));
         }
 

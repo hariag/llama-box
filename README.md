@@ -750,6 +750,12 @@ The available endpoints for the LLaMA Box server mode are:
       enabled `--mmproj` flag,
       see https://huggingface.co/xtuner/llava-phi-3-mini-gguf/tree/main.
     + Allow adjusting the scale of LoRA adapters with `lora` field.
+    + Jinja template parameters can be supplied per request with `chat_template_kwargs`; request values override
+      `--chat-template-kwargs` defaults. `enable_thinking` controls the thinking mode and `preserve_thinking` is
+      forwarded to templates that support it.
+    + `reasoning_effort` is forwarded to the Jinja template for model-specific modes such as `xhigh`, `medium`, and
+      `low`; `none` disables thinking for the request. With streaming enabled, `stream_options.include_usage` adds
+      usage information to the final chunk.
 
 - **POST** `/v1/embeddings`: (OpenAI-compatible) Returns the embeddings of the given prompt,
   see https://platform.openai.com/docs/api-reference/embeddings/create.

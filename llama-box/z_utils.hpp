@@ -10,6 +10,11 @@
 #include "llama.cpp/common/log.h"
 #include "llama.cpp/vendor/nlohmann/json.hpp"
 
+// llama-box still uses nlohmann::json for its HTTP compatibility layer.  The
+// upstream common library now exposes its own common_json type instead of a
+// global json alias, so keep the legacy alias local to this layer.
+using json = nlohmann::json;
+
 // Kept as a compatibility declaration for llama-box's existing verbosity
 // macros.  New upstream code should prefer common_log_get_verbosity_thold().
 extern int common_log_verbosity_thold;
