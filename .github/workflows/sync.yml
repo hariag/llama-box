@@ -35,12 +35,28 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 240
     steps:
+      - name: Check GitCode credentials
+        id: credentials
+        shell: bash
+        env:
+          GITCODE_USERNAME: "${{ secrets.CI_GITCODE_USERNAME }}"
+          GITCODE_PASSWORD: "${{ secrets.CI_GITCODE_PASSWORD }}"
+          GITCODE_TOKEN: "${{ secrets.CI_GITCODE_TOKEN }}"
+        run: |
+          if [[ -z "${GITCODE_USERNAME}" || -z "${GITCODE_PASSWORD}" || -z "${GITCODE_TOKEN}" ]]; then
+            echo "::warning::GitCode sync skipped: required credentials are not configured"
+            echo "configured=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo "configured=true" >> "${GITHUB_OUTPUT}"
+          fi
       - name: Checkout
+        if: steps.credentials.outputs.configured == 'true'
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           persist-credentials: false
       - name: Sync
+        if: steps.credentials.outputs.configured == 'true'
         uses: gpustack/.github/.github/actions/mirror-release-gitcode@main
         with:
           gitcode-username: "${{ secrets.CI_GITCODE_USERNAME }}"
@@ -55,12 +71,27 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 120
     steps:
+      - name: Check Gitee credentials
+        id: credentials
+        shell: bash
+        env:
+          GITEE_USERNAME: "${{ secrets.CI_GITEE_USERNAME }}"
+          GITEE_TOKEN: "${{ secrets.CI_GITEE_TOKEN }}"
+        run: |
+          if [[ -z "${GITEE_USERNAME}" || -z "${GITEE_TOKEN}" ]]; then
+            echo "::warning::Gitee sync skipped: required credentials are not configured"
+            echo "configured=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo "configured=true" >> "${GITHUB_OUTPUT}"
+          fi
       - name: Checkout
+        if: steps.credentials.outputs.configured == 'true'
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           persist-credentials: false
       - name: Sync
+        if: steps.credentials.outputs.configured == 'true'
         uses: gpustack/.github/.github/actions/mirror-release-gitee@main
         with:
           gitee-username: "${{ secrets.CI_GITEE_USERNAME }}"

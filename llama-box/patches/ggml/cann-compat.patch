@@ -1,0 +1,11 @@
+diff --git a/src/ggml-cann/aclnn_ops.cpp b/src/ggml-cann/aclnn_ops.cpp
+--- a/src/ggml-cann/aclnn_ops.cpp
++++ b/src/ggml-cann/aclnn_ops.cpp
+@@ -65,7 +65,6 @@
+ #include <aclnnop/aclnn_permute.h>
+ #include <aclnnop/aclnn_pow.h>
+ #include <aclnnop/aclnn_pow_tensor_tensor.h>
+-#include <aclnnop/aclnn_recurrent_gated_delta_rule.h>
+ #include <aclnnop/aclnn_reduce_sum.h>
+ #include <aclnnop/aclnn_reflection_pad1d.h>
+ #include <aclnnop/aclnn_repeat.h>
