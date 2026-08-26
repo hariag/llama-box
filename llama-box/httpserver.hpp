@@ -21,6 +21,7 @@
 #include "llama.cpp/tools/mtmd/clip.h"
 #include "llama.cpp/vendor/cpp-httplib/httplib.h"
 #include "stable-diffusion.cpp/include/stable-diffusion.h"
+#include "dynamic_context_quota.hpp"
 
 #define SELF_PACKAGE 0
 #include "z_multimodal.hpp"
@@ -2172,7 +2173,10 @@ struct completions_task : btask {
 
     //// decode
     int32_t                 n_decoding_budget     = 0;  // indicate how many tokens can be decoded
+    int32_t                 requested_decoding_budget = 0;  // original output limit; -1 means unlimited
     int32_t                 n_decoded             = 0;  // indicate how many tokens have been decoded
+    int32_t                 dynamic_context_limit = 0;  // current quota when unified KV scheduling is enabled
+    bool                    dynamic_context_admitted = false;
     int64_t                 t_start_decode        = 0;  // indicate the time when decoding starts
     double                  t_decoded             = 0;  // indicate the time(ms) spent on decoding
     double                  p_decoded_tps         = 0;
@@ -2855,7 +2859,10 @@ struct httpserver {
         llm_ctx_size         = int32_t(llama_n_ctx(llm_ctx));
         llm_slot_ctx_size    = llm_ctx_size / llm_params.n_parallel;
         llm_ctx_embed_size   = llama_model_n_embd(llm_model);
-        llm_kv_cache_limit   = llm_slot_ctx_size - 1;
+        llm_kv_cache_limit   = (params.llm_params.kv_unified ? llm_ctx_size : llm_slot_ctx_size) - 1;
+        SRV_INF("completion context: total = %d, per-slot = %d, dynamic = %s, max-active = %d\n", llm_ctx_size,
+                llm_slot_ctx_size, params.llm_params.kv_unified ? "true" : "false",
+                params.llm_params.n_threads_http);
         llm_kv_cache_shift   = llama_memory_can_shift(llama_get_memory(llm_ctx));
         // NB(thxCode): llama_causal_attn is a patch.
         llm_model_casual     = llama_causal_attn(llm_ctx);
@@ -3408,6 +3415,7 @@ struct httpserver {
     httpserver_metrics                                                                     metrics;
     std::unique_ptr<BlockingConcurrentQueue<std::unique_ptr<btask>>>                       process_tasks;
     std::vector<std::unique_ptr<BlockingReaderWriterQueue<std::unique_ptr<btask_result>>>> process_task_results;
+    std::unordered_map<int32_t, completions_task *>                                        active_completion_tasks;
 
     // lora
     std::vector<common_adapter_lora_info> lora_adapters;
@@ -3517,6 +3525,118 @@ struct httpserver {
 
     inline bool support_completion() const {
         return llm_ctx != nullptr && llm_model_casual && params.llm_params.pooling_type != LLAMA_POOLING_TYPE_RANK;
+    }
+
+    inline bool dynamic_context_enabled() const {
+        return support_completion() && params.llm_params.kv_unified;
+    }
+
+    inline int32_t completion_context_limit() const {
+        return dynamic_context_enabled() ? llm_ctx_size : llm_slot_ctx_size;
+    }
+
+    inline int32_t completion_task_position(const completions_task * task) const {
+        return llama_box::dynamic_context_quota::position_for_budget(task->pos);
+    }
+
+    inline void refresh_completion_task_budget(completions_task * task) {
+        if (!dynamic_context_enabled() || task == nullptr || !task->dynamic_context_admitted) {
+            return;
+        }
+
+        task->n_decoding_budget = llama_box::dynamic_context_quota::remaining_output_budget(
+            task->dynamic_context_limit,
+            completion_task_position(task),
+            task->requested_decoding_budget,
+            task->n_decoded);
+    }
+
+    inline void refresh_active_completion_budgets() {
+        for (const auto & [tid, task] : active_completion_tasks) {
+            (void) tid;
+            refresh_completion_task_budget(task);
+        }
+    }
+
+    enum class completion_admission_status {
+        ready,
+        wait,
+        reject,
+    };
+
+    inline completion_admission_status check_completion_admission(const completions_task * task,
+                                                                  int32_t & quota,
+                                                                  int32_t & active,
+                                                                  int32_t & max_position) const {
+        quota        = completion_context_limit();
+        active       = int32_t(active_completion_tasks.size());
+        max_position = 0;
+
+        if (!dynamic_context_enabled() || task->dynamic_context_admitted) {
+            quota = task->dynamic_context_admitted ? task->dynamic_context_limit : completion_context_limit();
+            return completion_admission_status::ready;
+        }
+
+        if (task->n_prefilling_request > llm_ctx_size) {
+            return completion_admission_status::reject;
+        }
+        if (active >= params.llm_params.n_threads_http) {
+            return completion_admission_status::wait;
+        }
+
+        quota = llama_box::dynamic_context_quota::for_active_requests(llm_ctx_size, active + 1);
+        if (quota <= 0) {
+            return completion_admission_status::reject;
+        }
+
+        std::vector<int32_t> positions;
+        positions.reserve(active_completion_tasks.size());
+        for (const auto & [tid, active_task] : active_completion_tasks) {
+            (void) tid;
+            const int32_t position = completion_task_position(active_task);
+            max_position          = std::max(max_position, position);
+            positions.push_back(position);
+        }
+
+        if (!llama_box::dynamic_context_quota::positions_fit(positions, quota) ||
+            task->n_prefilling_request > quota) {
+            return completion_admission_status::wait;
+        }
+        return completion_admission_status::ready;
+    }
+
+    inline void register_completion_task(completions_task * task, int32_t quota) {
+        if (!dynamic_context_enabled() || task == nullptr || task->dynamic_context_admitted) {
+            return;
+        }
+
+        task->dynamic_context_limit    = quota;
+        task->dynamic_context_admitted = true;
+        active_completion_tasks[task->get_id()] = task;
+        for (const auto & [tid, active_task] : active_completion_tasks) {
+            (void) tid;
+            active_task->dynamic_context_limit = quota;
+        }
+        refresh_active_completion_budgets();
+    }
+
+    inline void release_completion_task(completions_task * task) {
+        if (!dynamic_context_enabled() || task == nullptr || !task->dynamic_context_admitted) {
+            return;
+        }
+
+        active_completion_tasks.erase(task->get_id());
+        task->dynamic_context_admitted = false;
+        task->dynamic_context_limit     = 0;
+        const int32_t active = int32_t(active_completion_tasks.size());
+        if (active > 0) {
+            const int32_t quota = llama_box::dynamic_context_quota::for_active_requests(llm_ctx_size, active);
+            for (const auto & [tid, active_task] : active_completion_tasks) {
+                (void) tid;
+                active_task->dynamic_context_limit = quota;
+            }
+        }
+        refresh_active_completion_budgets();
     }
 
     inline bool support_embedding() const { return llm_ctx != nullptr && params.llm_params.embedding; }
@@ -3823,6 +3943,35 @@ struct httpserver {
 
                     // prefill first (n_prefilled < n_prefilling_request)
                     if (batch_process_type == PROCESS_UNKNOWN && task->n_prefilled < task->n_prefilling_request) {
+                        int32_t admission_quota = 0;
+                        if (dynamic_context_enabled() && !task->dynamic_context_admitted) {
+                            int32_t active       = 0;
+                            int32_t max_position = 0;
+                            const completion_admission_status admission =
+                                check_completion_admission(task, admission_quota, active, max_position);
+                            if (admission == completion_admission_status::reject) {
+                                SRV_ERR(
+                                    "rid %s | prompt tokens size exceeds the unified context size, "
+                                    "prefill_t = %d, n_ctx = %d\n",
+                                    rid.c_str(), task->n_prefilling_request, llm_ctx_size);
+                                json data = {
+                                    { "message", "Illegal param: prompt tokens size exceeds the context size" }
+                                };
+                                process_task_results[tid]->enqueue(
+                                    std::make_unique<btask_result>(httplib::BadRequest_400, std::move(data)));
+                                continue;
+                            }
+                            if (admission == completion_admission_status::wait) {
+                                SRV_DBG(
+                                    "rid %s | batching, waiting dynamic context admission: "
+                                    "active = %d, candidate_quota = %d, max_active_position = %d, "
+                                    "prompt_t = %d\n",
+                                    rid.c_str(), active, admission_quota, max_position, task->n_prefilling_request);
+                                process_tasks->enqueue(std::move(task_ptr));
+                                continue;
+                            }
+                        }
+
                         // filter
                         if (llm_kv_cache_used - llm_kv_cache_inactive + task->n_prefilling_request >
                             llm_kv_cache_limit) {
@@ -3942,6 +4091,10 @@ struct httpserver {
                                 "clean kv cache, seq %d = [%d, end)\n",
                                 rid.c_str(), seq_id, task->pos);
                             llm_kv_cache_used += task->pos;
+                        }
+
+                        if (dynamic_context_enabled() && !task->dynamic_context_admitted) {
+                            register_completion_task(task, admission_quota);
                         }
 
                         // batching
@@ -4131,6 +4284,7 @@ struct httpserver {
                             };
                             process_task_results[tid]->enqueue(
                                 std::make_unique<btask_result>(httplib::InternalServerError_500, std::move(data)));
+                            release_completion_task(task);
                             continue;
                         }
                         // append processed tokens
@@ -4139,6 +4293,7 @@ struct httpserver {
                         // save for cache prompts,
                         // so we need to mark the base in n_processed_detokenized
                         task->n_processed_detokenized = task->n_prefilling_request;
+                        refresh_completion_task_budget(task);
                         SRV_DBG("rid %s | batching, decode, seq = %d\n", rid.c_str(), seq_id);
 
                         task->i_batch_seq_end = (batch_text.n_tokens + (batch_view_max - 1)) % batch_view_max;
@@ -4336,6 +4491,7 @@ struct httpserver {
                             };
                             process_task_results[task->get_id()]->enqueue(
                                 std::make_unique<btask_result>(httplib::InternalServerError_500, std::move(data)));
+                            release_completion_task(task);
                         }
                         return;
                     }
@@ -4384,6 +4540,7 @@ struct httpserver {
                             };
                             process_task_results[task_ptr->get_id()]->enqueue(
                                 std::make_unique<btask_result>(httplib::InternalServerError_500, std::move(data)));
+                            release_completion_task(task);
                         }
                         return;
                     }
@@ -4900,6 +5057,17 @@ struct httpserver {
                                     };
                                     process_task_results[tid]->enqueue(std::make_unique<btask_result>(
                                         httplib::InternalServerError_500, std::move(data)));
+                                    llama_memory_seq_rm(llama_get_memory(llm_ctx), seq_id, 0, -1);
+                                    llama_memory_seq_rm(llama_get_memory(llm_ctx_draft), seq_id, 0, -1);
+                                    if (cache_prompt) {
+                                        cache_prompt_entry & cache = cache_prompts.at(seq_id);
+                                        cache.tokens.clear();
+                                        cache.used        = false;
+                                        cache.pos         = 0;
+                                        cache.pos_discard = 0;
+                                    }
+                                    llm_kv_cache_used -= task->pos;
+                                    release_completion_task(task);
                                     continue;
                                 }
                                 // speculative in n_max times
@@ -5007,6 +5175,7 @@ struct httpserver {
                                  "seq = %d, kv_cache_used = %d, kv_cache_inactive = %d\n",
                                  rid.c_str(), seq_id, llm_kv_cache_used, llm_kv_cache_inactive);
                     }
+                    release_completion_task(task);
                 }
                 return;
             }
@@ -5707,6 +5876,8 @@ struct httpserver {
                 { "n_ctx",                       llm_ctx_size                                     },
                 { "n_slot",                      params.llm_params.n_threads_http                 },
                 { "n_slot_ctx",                  llm_slot_ctx_size                                },
+                { "dynamic_context",              dynamic_context_enabled()                        },
+                { "n_ctx_single",                completion_context_limit()                      },
                 { "ctx_shift",                   shift_context                                    },
                 { "prompt_cache",                cache_prompt                                     },
                 { "seed",                        int32_t(params.llm_params.sampling.seed)         },
@@ -5794,7 +5965,15 @@ struct httpserver {
         {
             llama_tokens tokenized_prompt = tokenize_prompt(llm_vocab, req->prompt, true, true);
             n_prefilling_request          = int32_t(tokenized_prompt.size());
-            if (n_prefilling_request >= llm_slot_ctx_size) {
+            if (dynamic_context_enabled() && n_prefilling_request >= llm_ctx_size) {
+                SRV_ERR(
+                    "rid %s | prompt tokens size exceeds the unified context size, "
+                    "prefill_t = %d, n_ctx = %d\n",
+                    req->get_id(), n_prefilling_request, llm_ctx_size);
+                return send_json(request, response, httplib::BadRequest_400,
+                                 "Illegal param: prompt tokens size exceeds the context size");
+            }
+            if (!dynamic_context_enabled() && n_prefilling_request >= llm_slot_ctx_size) {
                 if (!shift_context) {
                     SRV_ERR(
                         "rid %s | prompt tokens size exceeds the context size, please enable context shift "
@@ -5826,7 +6005,7 @@ struct httpserver {
             return send_json(request, response, httplib::BadRequest_400, "Illegal param: empty completions tokens");
         }
 
-        int32_t n_decoding_budget = llm_slot_ctx_size;
+        int32_t n_decoding_budget = completion_context_limit();
         if (req->max_tokens > 0) {
             n_decoding_budget = req->max_tokens;
         } else if (req->max_tokens < 0) {
@@ -5863,6 +6042,7 @@ struct httpserver {
         task->tokenized_prompts    = std::move(tokenized_prompts);
         task->n_prefilling_request = n_prefilling_request;
         task->n_decoding_budget    = n_decoding_budget;
+        task->requested_decoding_budget = req->max_tokens < 0 ? -1 : n_decoding_budget;
         task->sampler              = sampler;
         task->sampler_draft        = sampler_draft;
         task->cmpl_id              = gen_completion_id();
@@ -5914,7 +6094,15 @@ struct httpserver {
         if (req->multimedias.empty()) {
             llama_tokens tokenized_prompt = tokenize_prompt(llm_vocab, req->chat_params.prompt, true, true);
             n_prefilling_request          = int32_t(tokenized_prompt.size());
-            if (n_prefilling_request >= llm_slot_ctx_size) {
+            if (dynamic_context_enabled() && n_prefilling_request >= llm_ctx_size) {
+                SRV_ERR(
+                    "rid %s | prompt tokens size exceeds the unified context size, "
+                    "prefill_t = %d, n_ctx = %d\n",
+                    req->get_id(), n_prefilling_request, llm_ctx_size);
+                return send_json(request, response, httplib::BadRequest_400,
+                                 "Illegal param: prompt tokens size exceeds the context size");
+            }
+            if (!dynamic_context_enabled() && n_prefilling_request >= llm_slot_ctx_size) {
                 if (!shift_context) {
                     SRV_ERR(
                         "rid %s | prompt tokens size exceeds the context size, please enable context shift "
@@ -6256,11 +6444,12 @@ struct httpserver {
                 tokenized_prompts.emplace_back(std::move(tokenized_text));
             }
 
-            if (n_prefilling_request >= llm_slot_ctx_size) {
+            if ((dynamic_context_enabled() && n_prefilling_request >= llm_ctx_size) ||
+                (!dynamic_context_enabled() && n_prefilling_request >= llm_slot_ctx_size)) {
                 SRV_ERR(
                     "rid %s | prompt tokens size exceeds the context size, please increase the context size "
                     "or reduce prompt size, prefill_t = %d, n_ctx = %d\n",
-                    req->get_id(), n_prefilling_request, llm_slot_ctx_size);
+                    req->get_id(), n_prefilling_request, completion_context_limit());
                 return send_json(request, response, httplib::BadRequest_400,
                                  "Illegal param: prompt tokens size exceeds the context size");
             }
@@ -6276,7 +6465,7 @@ struct httpserver {
 
         bool tokenized_prompts_include_tools = !req->tools.empty();
 
-        int32_t n_decoding_budget = llm_slot_ctx_size;
+        int32_t n_decoding_budget = completion_context_limit();
         if (req->max_tokens > 0) {
             n_decoding_budget = req->max_tokens;
         } else if (req->max_tokens < 0) {
@@ -6329,6 +6518,7 @@ struct httpserver {
         task->tokenized_prompts_include_multimedias = tokenized_prompts_include_multimedias;
         task->tokenized_prompts_include_tools       = tokenized_prompts_include_tools;
         task->n_decoding_budget                     = n_decoding_budget;
+        task->requested_decoding_budget             = req->max_tokens < 0 ? -1 : n_decoding_budget;
         task->n_prefilling_request                  = n_prefilling_request;
         task->sampler                               = sampler;
         task->sampler_draft                         = sampler_draft;

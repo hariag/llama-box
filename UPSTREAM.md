@@ -1,11 +1,11 @@
 # Upstream dependency policy
 
 This repository is a thin integration layer around four upstream projects. The
-submodule revisions below were refreshed on 2026-08-22:
+submodule revisions below were refreshed on 2026-08-25:
 
 | Dependency | Revision | Update policy |
 | --- | --- | --- |
-| [llama.cpp](https://github.com/ggml-org/llama.cpp) | `e85caa81ea2b65797396018c179b87ad61fa38ab` | Track `master`; the current mtmd/common APIs are adapted by `zz_compat.patch`. |
+| [llama.cpp](https://github.com/ggml-org/llama.cpp) | `eb25b7263e1604b4382295563f5a924002d6f87c` | Track `master`; the current mtmd/common APIs are adapted by `zz_compat.patch`. |
 | [stable-diffusion.cpp](https://github.com/thxcode/stable-diffusion.cpp) | `adbed8f22496342410ef565476fddc156b20e7f7` | Track `dev-dcf91f9e-5`; this is newer than the repository's stale `master` branch and is the branch configured in `.gitmodules`. |
 | [concurrentqueue](https://github.com/cameron314/concurrentqueue) | `683b9e31ea15eb69f1b81cc1defc7850d5f20b71` | Track `master`. |
 | [readerwriterqueue](https://github.com/cameron314/readerwriterqueue) | `131af2c479c6ba36142ee9805e9f60fc4adfa22c` | Track `master`. |
