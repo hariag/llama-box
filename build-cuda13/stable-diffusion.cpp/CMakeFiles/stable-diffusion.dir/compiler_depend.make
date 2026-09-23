@@ -1968,7 +1968,10 @@ stable-diffusion.cpp/CMakeFiles/stable-diffusion.dir/src/core/ggml_graph_cut.cpp
 
 stable-diffusion.cpp/CMakeFiles/stable-diffusion.dir/src/core/ggml_runner.cpp.o: ../stable-diffusion.cpp/src/core/ggml_runner.cpp \
   /usr/include/stdc-predef.h \
-  /usr/include/malloc.h \
+  /usr/include/c++/11/algorithm \
+  /usr/include/c++/11/utility \
+  /usr/include/x86_64-linux-gnu/c++/11/bits/c++config.h \
+  /usr/include/x86_64-linux-gnu/c++/11/bits/os_defines.h \
   /usr/include/features.h \
   /usr/include/features-time64.h \
   /usr/include/x86_64-linux-gnu/bits/wordsize.h \
@@ -1977,29 +1980,6 @@ stable-diffusion.cpp/CMakeFiles/stable-diffusion.dir/src/core/ggml_runner.cpp.o:
   /usr/include/x86_64-linux-gnu/bits/long-double.h \
   /usr/include/x86_64-linux-gnu/gnu/stubs.h \
   /usr/include/x86_64-linux-gnu/gnu/stubs-64.h \
-  /usr/lib/gcc/x86_64-linux-gnu/11/include/stddef.h \
-  /usr/include/stdio.h \
-  /usr/include/x86_64-linux-gnu/bits/libc-header-start.h \
-  /usr/lib/gcc/x86_64-linux-gnu/11/include/stdarg.h \
-  /usr/include/x86_64-linux-gnu/bits/types.h \
-  /usr/include/x86_64-linux-gnu/bits/typesizes.h \
-  /usr/include/x86_64-linux-gnu/bits/time64.h \
-  /usr/include/x86_64-linux-gnu/bits/types/__fpos_t.h \
-  /usr/include/x86_64-linux-gnu/bits/types/__mbstate_t.h \
-  /usr/include/x86_64-linux-gnu/bits/types/__fpos64_t.h \
-  /usr/include/x86_64-linux-gnu/bits/types/__FILE.h \
-  /usr/include/x86_64-linux-gnu/bits/types/FILE.h \
-  /usr/include/x86_64-linux-gnu/bits/types/struct_FILE.h \
-  /usr/include/x86_64-linux-gnu/bits/types/cookie_io_functions_t.h \
-  /usr/include/x86_64-linux-gnu/bits/stdio_lim.h \
-  /usr/include/x86_64-linux-gnu/bits/floatn.h \
-  /usr/include/x86_64-linux-gnu/bits/floatn-common.h \
-  /usr/include/x86_64-linux-gnu/bits/stdio.h \
-  /usr/include/x86_64-linux-gnu/bits/stdio2.h \
-  /usr/include/c++/11/algorithm \
-  /usr/include/c++/11/utility \
-  /usr/include/x86_64-linux-gnu/c++/11/bits/c++config.h \
-  /usr/include/x86_64-linux-gnu/c++/11/bits/os_defines.h \
   /usr/include/x86_64-linux-gnu/c++/11/bits/cpu_defines.h \
   /usr/include/c++/11/pstl/pstl_config.h \
   /usr/include/c++/11/bits/stl_relops.h \
@@ -2024,11 +2004,18 @@ stable-diffusion.cpp/CMakeFiles/stable-diffusion.dir/src/core/ggml_runner.cpp.o:
   /usr/include/c++/11/bits/stl_algo.h \
   /usr/include/c++/11/cstdlib \
   /usr/include/stdlib.h \
+  /usr/include/x86_64-linux-gnu/bits/libc-header-start.h \
+  /usr/lib/gcc/x86_64-linux-gnu/11/include/stddef.h \
   /usr/include/x86_64-linux-gnu/bits/waitflags.h \
   /usr/include/x86_64-linux-gnu/bits/waitstatus.h \
+  /usr/include/x86_64-linux-gnu/bits/floatn.h \
+  /usr/include/x86_64-linux-gnu/bits/floatn-common.h \
   /usr/include/x86_64-linux-gnu/bits/types/locale_t.h \
   /usr/include/x86_64-linux-gnu/bits/types/__locale_t.h \
   /usr/include/x86_64-linux-gnu/sys/types.h \
+  /usr/include/x86_64-linux-gnu/bits/types.h \
+  /usr/include/x86_64-linux-gnu/bits/typesizes.h \
+  /usr/include/x86_64-linux-gnu/bits/time64.h \
   /usr/include/x86_64-linux-gnu/bits/types/clock_t.h \
   /usr/include/x86_64-linux-gnu/bits/types/clockid_t.h \
   /usr/include/x86_64-linux-gnu/bits/types/time_t.h \
@@ -2115,6 +2102,18 @@ stable-diffusion.cpp/CMakeFiles/stable-diffusion.dir/src/core/ggml_runner.cpp.o:
   ../llama.cpp/ggml/include/ggml-backend.h \
   ../llama.cpp/ggml/include/ggml.h \
   /usr/lib/gcc/x86_64-linux-gnu/11/include/stdbool.h \
+  /usr/include/stdio.h \
+  /usr/lib/gcc/x86_64-linux-gnu/11/include/stdarg.h \
+  /usr/include/x86_64-linux-gnu/bits/types/__fpos_t.h \
+  /usr/include/x86_64-linux-gnu/bits/types/__mbstate_t.h \
+  /usr/include/x86_64-linux-gnu/bits/types/__fpos64_t.h \
+  /usr/include/x86_64-linux-gnu/bits/types/__FILE.h \
+  /usr/include/x86_64-linux-gnu/bits/types/FILE.h \
+  /usr/include/x86_64-linux-gnu/bits/types/struct_FILE.h \
+  /usr/include/x86_64-linux-gnu/bits/types/cookie_io_functions_t.h \
+  /usr/include/x86_64-linux-gnu/bits/stdio_lim.h \
+  /usr/include/x86_64-linux-gnu/bits/stdio.h \
+  /usr/include/x86_64-linux-gnu/bits/stdio2.h \
   ../llama.cpp/ggml/include/ggml-alloc.h \
   ../stable-diffusion.cpp/src/core/ggml_extend_backend.h \
   /usr/include/c++/11/cstring \
@@ -7347,7 +7346,10 @@ stable-diffusion.cpp/CMakeFiles/stable-diffusion.dir/src/model_io/torch_zip_io.c
 
 stable-diffusion.cpp/CMakeFiles/stable-diffusion.dir/src/model_loader.cpp.o: ../stable-diffusion.cpp/src/model_loader.cpp \
   /usr/include/stdc-predef.h \
-  /usr/include/malloc.h \
+  /usr/include/c++/11/algorithm \
+  /usr/include/c++/11/utility \
+  /usr/include/x86_64-linux-gnu/c++/11/bits/c++config.h \
+  /usr/include/x86_64-linux-gnu/c++/11/bits/os_defines.h \
   /usr/include/features.h \
   /usr/include/features-time64.h \
   /usr/include/x86_64-linux-gnu/bits/wordsize.h \
@@ -7356,29 +7358,6 @@ stable-diffusion.cpp/CMakeFiles/stable-diffusion.dir/src/model_loader.cpp.o: ../
   /usr/include/x86_64-linux-gnu/bits/long-double.h \
   /usr/include/x86_64-linux-gnu/gnu/stubs.h \
   /usr/include/x86_64-linux-gnu/gnu/stubs-64.h \
-  /usr/lib/gcc/x86_64-linux-gnu/11/include/stddef.h \
-  /usr/include/stdio.h \
-  /usr/include/x86_64-linux-gnu/bits/libc-header-start.h \
-  /usr/lib/gcc/x86_64-linux-gnu/11/include/stdarg.h \
-  /usr/include/x86_64-linux-gnu/bits/types.h \
-  /usr/include/x86_64-linux-gnu/bits/typesizes.h \
-  /usr/include/x86_64-linux-gnu/bits/time64.h \
-  /usr/include/x86_64-linux-gnu/bits/types/__fpos_t.h \
-  /usr/include/x86_64-linux-gnu/bits/types/__mbstate_t.h \
-  /usr/include/x86_64-linux-gnu/bits/types/__fpos64_t.h \
-  /usr/include/x86_64-linux-gnu/bits/types/__FILE.h \
-  /usr/include/x86_64-linux-gnu/bits/types/FILE.h \
-  /usr/include/x86_64-linux-gnu/bits/types/struct_FILE.h \
-  /usr/include/x86_64-linux-gnu/bits/types/cookie_io_functions_t.h \
-  /usr/include/x86_64-linux-gnu/bits/stdio_lim.h \
-  /usr/include/x86_64-linux-gnu/bits/floatn.h \
-  /usr/include/x86_64-linux-gnu/bits/floatn-common.h \
-  /usr/include/x86_64-linux-gnu/bits/stdio.h \
-  /usr/include/x86_64-linux-gnu/bits/stdio2.h \
-  /usr/include/c++/11/algorithm \
-  /usr/include/c++/11/utility \
-  /usr/include/x86_64-linux-gnu/c++/11/bits/c++config.h \
-  /usr/include/x86_64-linux-gnu/c++/11/bits/os_defines.h \
   /usr/include/x86_64-linux-gnu/c++/11/bits/cpu_defines.h \
   /usr/include/c++/11/pstl/pstl_config.h \
   /usr/include/c++/11/bits/stl_relops.h \
@@ -7403,11 +7382,18 @@ stable-diffusion.cpp/CMakeFiles/stable-diffusion.dir/src/model_loader.cpp.o: ../
   /usr/include/c++/11/bits/stl_algo.h \
   /usr/include/c++/11/cstdlib \
   /usr/include/stdlib.h \
+  /usr/include/x86_64-linux-gnu/bits/libc-header-start.h \
+  /usr/lib/gcc/x86_64-linux-gnu/11/include/stddef.h \
   /usr/include/x86_64-linux-gnu/bits/waitflags.h \
   /usr/include/x86_64-linux-gnu/bits/waitstatus.h \
+  /usr/include/x86_64-linux-gnu/bits/floatn.h \
+  /usr/include/x86_64-linux-gnu/bits/floatn-common.h \
   /usr/include/x86_64-linux-gnu/bits/types/locale_t.h \
   /usr/include/x86_64-linux-gnu/bits/types/__locale_t.h \
   /usr/include/x86_64-linux-gnu/sys/types.h \
+  /usr/include/x86_64-linux-gnu/bits/types.h \
+  /usr/include/x86_64-linux-gnu/bits/typesizes.h \
+  /usr/include/x86_64-linux-gnu/bits/time64.h \
   /usr/include/x86_64-linux-gnu/bits/types/clock_t.h \
   /usr/include/x86_64-linux-gnu/bits/types/clockid_t.h \
   /usr/include/x86_64-linux-gnu/bits/types/time_t.h \
@@ -7498,6 +7484,7 @@ stable-diffusion.cpp/CMakeFiles/stable-diffusion.dir/src/model_loader.cpp.o: ../
   /usr/include/c++/11/cinttypes \
   /usr/include/inttypes.h \
   /usr/include/c++/11/cstdarg \
+  /usr/lib/gcc/x86_64-linux-gnu/11/include/stdarg.h \
   /usr/include/c++/11/fstream \
   /usr/include/c++/11/istream \
   /usr/include/c++/11/ios \
@@ -7508,6 +7495,9 @@ stable-diffusion.cpp/CMakeFiles/stable-diffusion.dir/src/model_loader.cpp.o: ../
   /usr/include/wchar.h \
   /usr/include/x86_64-linux-gnu/bits/types/wint_t.h \
   /usr/include/x86_64-linux-gnu/bits/types/mbstate_t.h \
+  /usr/include/x86_64-linux-gnu/bits/types/__mbstate_t.h \
+  /usr/include/x86_64-linux-gnu/bits/types/__FILE.h \
+  /usr/include/x86_64-linux-gnu/bits/types/FILE.h \
   /usr/include/x86_64-linux-gnu/bits/wchar2.h \
   /usr/include/c++/11/exception \
   /usr/include/c++/11/bits/exception_ptr.h \
@@ -7544,6 +7534,14 @@ stable-diffusion.cpp/CMakeFiles/stable-diffusion.dir/src/model_loader.cpp.o: ../
   /usr/include/c++/11/bits/string_view.tcc \
   /usr/include/c++/11/ext/string_conversions.h \
   /usr/include/c++/11/cstdio \
+  /usr/include/stdio.h \
+  /usr/include/x86_64-linux-gnu/bits/types/__fpos_t.h \
+  /usr/include/x86_64-linux-gnu/bits/types/__fpos64_t.h \
+  /usr/include/x86_64-linux-gnu/bits/types/struct_FILE.h \
+  /usr/include/x86_64-linux-gnu/bits/types/cookie_io_functions_t.h \
+  /usr/include/x86_64-linux-gnu/bits/stdio_lim.h \
+  /usr/include/x86_64-linux-gnu/bits/stdio.h \
+  /usr/include/x86_64-linux-gnu/bits/stdio2.h \
   /usr/include/c++/11/cerrno \
   /usr/include/errno.h \
   /usr/include/x86_64-linux-gnu/bits/errno.h \
@@ -17624,10 +17622,6 @@ stable-diffusion.cpp/CMakeFiles/stable-diffusion.dir/src/version.cpp.o: ../stabl
 
 /usr/include/c++/11/iterator:
 
-../stable-diffusion.cpp/src/model/diffusion/sefi_image.hpp:
-
-/usr/include/c++/11/bits/string_view.tcc:
-
 /usr/include/c++/11/bits/hash_bytes.h:
 
 /usr/include/c++/11/bits/move.h:
@@ -17958,6 +17952,10 @@ stable-diffusion.cpp/CMakeFiles/stable-diffusion.dir/src/version.cpp.o: ../stabl
 
 /usr/include/strings.h:
 
+../stable-diffusion.cpp/src/model/diffusion/qwen_image_2_1.hpp:
+
+/usr/include/x86_64-linux-gnu/bits/struct_rwlock.h:
+
 /usr/include/c++/11/bits/refwrap.h:
 
 /usr/include/linux/stddef.h:
@@ -18242,16 +18240,6 @@ stable-diffusion.cpp/CMakeFiles/stable-diffusion.dir/src/version.cpp.o: ../stabl
 
 /usr/include/x86_64-linux-gnu/bits/mman-linux.h:
 
-../stable-diffusion.cpp/src/model/diffusion/qwen_image_2_1.hpp:
-
-/usr/include/x86_64-linux-gnu/bits/struct_rwlock.h:
-
-/usr/include/malloc.h:
-
-../stable-diffusion.cpp/src/model/adapter/ip_adapter.hpp:
-
-/usr/include/x86_64-linux-gnu/bits/confname.h:
-
 ../stable-diffusion.cpp/src/model/upscaler/esrgan.hpp:
 
 /usr/include/c++/11/bits/enable_special_members.h:
@@ -18315,6 +18303,10 @@ stable-diffusion.cpp/CMakeFiles/stable-diffusion.dir/src/version.cpp.o: ../stabl
 ../stable-diffusion.cpp/src/model/common/rope.hpp:
 
 /usr/include/x86_64-linux-gnu/bits/posix_opt.h:
+
+../stable-diffusion.cpp/src/model/adapter/ip_adapter.hpp:
+
+/usr/include/x86_64-linux-gnu/bits/confname.h:
 
 /usr/include/x86_64-linux-gnu/bits/stdlib.h:
 
@@ -18487,3 +18479,7 @@ stable-diffusion.cpp/CMakeFiles/stable-diffusion.dir/src/version.cpp.o: ../stabl
 ../stable-diffusion.cpp/src/model_manager_prefetch.cpp:
 
 ../stable-diffusion.cpp/src/model/diffusion/control.hpp:
+
+/usr/include/c++/11/bits/string_view.tcc:
+
+../stable-diffusion.cpp/src/model/diffusion/sefi_image.hpp:

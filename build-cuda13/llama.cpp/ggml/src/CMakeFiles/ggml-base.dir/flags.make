@@ -3,13 +3,13 @@
 
 # compile C with /usr/bin/cc
 # compile CXX with /usr/bin/c++
-C_DEFINES = -DGGML_COMMIT=\"816ab425a\" -DGGML_MAX_NAME=128 -DGGML_SCHED_MAX_COPIES=4 -DGGML_VERSION=\"0.22.0\" -D_GNU_SOURCE -D_XOPEN_SOURCE=600
+C_DEFINES = -DGGML_COMMIT=\"077defde9\" -DGGML_MAX_NAME=128 -DGGML_SCHED_MAX_COPIES=4 -DGGML_VERSION=\"0.22.0\" -D_GNU_SOURCE -D_XOPEN_SOURCE=600
 
 C_INCLUDES = -I/src/llama.cpp/ggml/src/. -I/src/llama.cpp/ggml/src/../include
 
 C_FLAGS = -O3 -DNDEBUG -Wshadow -Wstrict-prototypes -Wpointer-arith -Wmissing-prototypes -Werror=implicit-int -Werror=implicit-function-declaration -Wall -Wextra -Wpedantic -Wcast-qual -Wno-unused-function -Wdouble-promotion -std=gnu11
 
-CXX_DEFINES = -DGGML_COMMIT=\"816ab425a\" -DGGML_MAX_NAME=128 -DGGML_SCHED_MAX_COPIES=4 -DGGML_VERSION=\"0.22.0\" -D_GNU_SOURCE -D_XOPEN_SOURCE=600
+CXX_DEFINES = -DGGML_COMMIT=\"077defde9\" -DGGML_MAX_NAME=128 -DGGML_SCHED_MAX_COPIES=4 -DGGML_VERSION=\"0.22.0\" -D_GNU_SOURCE -D_XOPEN_SOURCE=600
 
 CXX_INCLUDES = -I/src/llama.cpp/ggml/src/. -I/src/llama.cpp/ggml/src/../include
 
