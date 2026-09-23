@@ -380,8 +380,14 @@ static ggml_backend_t rpcserver_create_backend(rpcserver_params & params) {
         SRV_INF("%s", "using CPU backend\n");
     } else {
         while(true) {
+            if (gpu >= int32_t(ggml_backend_dev_count())) {
+                break;
+            }
             ggml_backend_device * dev = ggml_backend_dev_get(gpu);
-            if (ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_GPU) {
+            // NB: accept IGPU (integrated GPU, e.g. DGX Spark / GB10) as a valid GPU device,
+            // otherwise an UMA-only machine would spin past the registry end and abort.
+            if (ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_GPU ||
+                ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_IGPU) {
                 backend = ggml_backend_dev_init(dev, nullptr);
                 SRV_INF("using GPU backend: %s\n", ggml_backend_dev_name(dev));
                 break;
