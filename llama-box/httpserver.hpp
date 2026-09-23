@@ -2803,11 +2803,7 @@ struct httpserver {
         mtp_enabled = std::find(params.llm_params.speculative.types.begin(),
                                 params.llm_params.speculative.types.end(),
                                 COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params.llm_params.speculative.types.end();
-        if (mtp_enabled && !params.llm_params.speculative.draft.mparams.path.empty()) {
-            SRV_ERR("%s", "MTP cannot be combined with an external draft model in this server\n");
-            return false;
-        }
-        if (!params.llm_params.speculative.draft.mparams.path.empty() && params.llm_params.speculative.draft.n_max > 0) {
+        if (!mtp_enabled && !params.llm_params.speculative.draft.mparams.path.empty() && params.llm_params.speculative.draft.n_max > 0) {
             SRV_INF("loading draft model '%s'\n", params.llm_params.speculative.draft.mparams.path.c_str());
 
             common_params llm_params_draft         = params.llm_params;
@@ -3139,6 +3135,10 @@ struct httpserver {
                 } else if (alias == "gpt-oss") {
                     reasoning_start_word = "<|channel|>analysis<|message|>";
                     reasoning_end_word   = "<|start|>assistant<|channel|>final<|message|>";
+                } else if (string_starts_with(llm_model_arch_name, "gemma4")) {
+                    // gemma 4 emits a thought channel: <|channel>thought ... <channel|>
+                    reasoning_start_word = "<|channel>thought";
+                    reasoning_end_word   = "<channel|>";
                 }
                 support_reasoning =
                     !(string_starts_with(llm_model_arch_name, "qwen3") && params.llm_params.sampling.reasoning_budget_tokens == 0) &&
@@ -4747,15 +4747,26 @@ struct httpserver {
                                 // find reasoning end [in word]
                                 else if (!task->reasoning_end_found) {
                                     task->n_reasoning++;
-                                    task->reasoning_end_found =
-                                        string_ends_with(task->generated_text, reasoning_end_word);
+                                    // search anywhere in the accumulated text: with batched (MTP) decoding the
+                                    // end marker may arrive together with post-end content in one detokenize step
+                                    size_t end_pos = task->generated_text.find(reasoning_end_word);
+                                    task->reasoning_end_found = end_pos != std::string::npos;
                                     if (task->reasoning_end_found) {
                                         // ignore reasoning end content if needed
                                         if (!reasoning_in_content) {
-                                            task->reasoning_transition_filter.begin();
-                                            size_t pos = task->generated_text.rfind(reasoning_end_word);
-                                            task->generated_text_keep_pos = pos;
-                                            task->generated_text = task->generated_text.erase(pos);
+                                            if (!task->is_stream()) {
+                                                // non-stream: keep the reasoning text to report via reasoning_content
+                                                task->generated_reasoning_text = task->generated_text.substr(
+                                                    0, end_pos);
+                                                task->generated_text = task->generated_text.erase(
+                                                    0, end_pos + reasoning_end_word.length());
+                                            } else {
+                                                // stream: erase keeps only the post-end tail; send it as content
+                                                task->generated_text_keep_pos = 0;
+                                                task->generated_text = task->generated_text.erase(
+                                                    0, end_pos + reasoning_end_word.length());
+                                            }
+                                            task->reasoning_finished = true;
                                         }
                                     } else {
                                         send_text = reasoning_end_word.find(sampled_str) == std::string::npos;
