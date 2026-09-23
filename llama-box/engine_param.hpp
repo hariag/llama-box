@@ -99,6 +99,10 @@ static void add_rpc_devices(const std::string & servers) {
     auto ggml_backend_rpc_add_device_fn =
         (ggml_backend_rpc_add_device_t) ggml_backend_reg_get_proc_address(rpc_reg, "ggml_backend_rpc_add_device");
     if (!ggml_backend_rpc_add_device_fn) {
+        ggml_backend_rpc_add_device_fn =
+            (ggml_backend_rpc_add_device_t) ggml_backend_reg_get_proc_address(rpc_reg, "ggml_backend_rpc_add_server");
+    }
+    if (!ggml_backend_rpc_add_device_fn) {
         throw std::invalid_argument("failed to find RPC device add function");
     }
     for (const auto & server : rpc_servers) {
