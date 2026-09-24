@@ -75,7 +75,9 @@ struct llama_box_reasoning_transition_filter {
 
 static inline bool llama_box_jinja_tool_call_has_envelope(const std::string & generated_text) {
     return generated_text.find("<tool_call>") != std::string::npos ||
-           generated_text.find("<function=") != std::string::npos;
+           generated_text.find("<function=") != std::string::npos ||
+           // gemma4 emits `<|tool_call>call:name{...}<tool_call|>`
+           generated_text.find("<|tool_call>") != std::string::npos;
 }
 
 // The PEG parser can expose a partial tool call while the model is still
@@ -86,6 +88,12 @@ static inline bool llama_box_jinja_tool_call_is_complete(const std::string & gen
     const bool has_tool_call_end = generated_text.find("</tool_call>") != std::string::npos;
     const bool has_function = generated_text.find("<function=") != std::string::npos;
     const bool has_function_end = generated_text.find("</function>") != std::string::npos;
+    // gemma4's tool-call envelope closes with `<tool_call|>`
+    const bool has_gemma4_end = generated_text.find("<tool_call|>") != std::string::npos;
+
+    if (has_gemma4_end) {
+        return true;
+    }
 
     // Qwen3.8/Qwen3.5's official parser accepts an omitted opening
     // <tool_call>, but the closing envelope remains mandatory.  Requiring

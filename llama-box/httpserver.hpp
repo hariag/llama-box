@@ -1387,6 +1387,10 @@ static inline std::unique_ptr<chat_complete_req> get_chat_complete_req(
         ptr->enable_thinking        = request_options.enable_thinking;
         ptr->chat_params = common_chat_templates_apply(chat_templates, inputs);
         SRV_INFV(3, "rid %s | formatted prompt\n%s\n", rid.c_str(), ptr->chat_params.prompt.c_str());
+        SRV_INF("rid %s | chat format=%s grammar_len=%zu lazy=%d triggers=%zu preserved=%zu\n", rid.c_str(),
+                common_chat_format_name(ptr->chat_params.format), ptr->chat_params.grammar.size(),
+                (int) ptr->chat_params.grammar_lazy, ptr->chat_params.grammar_triggers.size(),
+                ptr->chat_params.preserved_tokens.size());
     };
 
     // merge sampling
@@ -3394,16 +3398,20 @@ struct httpserver {
         };
 
         // listening on socket
-        if (string_ends_with(std::string(params.llm_params.hostname), ".sock")) {
-            SRV_INF("listening sock = %s\n", params.llm_params.hostname.c_str());
+        // upstream moved hostname -> hostnames (vector); llama-box listens on the first address
+        const auto & listen_host = params.llm_params.hostnames.empty()
+                                       ? std::string("127.0.0.1")
+                                       : params.llm_params.hostnames.front();
+        if (string_ends_with(listen_host, ".sock")) {
+            SRV_INF("listening sock = %s\n", listen_host.c_str());
             server->set_address_family(AF_UNIX);
-            server->bind_to_port(params.llm_params.hostname, 1);
+            server->bind_to_port(listen_host, 1);
             return server->listen_after_bind();
         }
 
         // listening on port
-        SRV_INF("listening host = %s, port = %d\n", params.llm_params.hostname.c_str(), params.llm_params.port);
-        return server->listen(params.llm_params.hostname, params.llm_params.port);
+        SRV_INF("listening host = %s, port = %d\n", listen_host.c_str(), params.llm_params.port);
+        return server->listen(listen_host, params.llm_params.port);
     }
 
   private:
