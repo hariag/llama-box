@@ -2162,6 +2162,9 @@ struct completions_task : btask {
     size_t             generated_text_keep_pos = std::string::npos;  // erase after call to_json
     std::string        generated_text;            // keep [generated_text_keep_pos,) after call to_json if streaming
     std::string        generated_reasoning_text;  // indicate the generated reasoning text if not streaming
+    // per-token byte offsets into generated_text for fine-grained (per-token) streaming;
+    // invalidated (cleared) whenever word-mode/tool-call edits shift the text
+    std::vector<size_t> stream_token_offsets;
     std::vector<json>  generated_tool_calls;      // erase after call to_json if streaming
     std::vector<float> generated_probs;           // erase after call get_probs_json if streaming
     std::vector<std::vector<std::pair<llama_token /* tok */, float /* prob */>>>
@@ -2313,7 +2316,7 @@ struct completions_task : btask {
         return result;
     }
 
-    json to_json(const llama_context * llm_ctx, const bool reasoning_in_content) {
+    json to_json(const llama_context * llm_ctx, const bool reasoning_in_content, size_t send_len = 0) {
         bool stop          = !generated_finish_reason.empty();
         bool include_usage = stop && json_value(req->stream_options, "include_usage", true);
         bool is_chat       = req->get_type() == REQ_CHAT_COMPLETE;
@@ -2360,6 +2363,14 @@ struct completions_task : btask {
             };
         }
 
+        // per-token fine-grained streaming: send_len caps this chunk to the next token's bytes
+        size_t send_end = generated_text_keep_pos;
+        if (send_len > 0) {
+            send_end = std::min(send_len, generated_text.size());
+            if (generated_text_keep_pos == std::string::npos || send_end < generated_text_keep_pos) {
+                generated_text_keep_pos = send_end;
+            }
+        }
         std::string_view generated_text_send = std::string_view(generated_text).substr(0, generated_text_keep_pos);
 
         json choices = json::array();
@@ -4698,20 +4709,26 @@ struct httpserver {
                                     // avoid to remember the thinking content
                                     if (!task->is_stream() && !reasoning_in_content) {
                                         task->generated_reasoning_text.swap(task->generated_text);
+                                    task->stream_token_offsets.clear(); // text shifted: per-token offsets invalid
                                     } else {
                                         task->generated_text.clear();
+                                    task->stream_token_offsets.clear(); // text shifted: per-token offsets invalid
                                     }
                                 }
                             }
-                            sampled_str += task->reasoning_transition_filter.consume(
+                            const std::string piece = task->reasoning_transition_filter.consume(
                                 common_token_to_piece(llm_ctx, tok, special));
+                            sampled_str += piece;
+                            if (!piece.empty()) {
+                                task->generated_text += piece;
+                                task->stream_token_offsets.push_back(task->generated_text.size());
+                            }
                         }
                         if (sampled_eog) {
                             // The request is terminal.  The remaining tokens were verified in the
                             // same MTP batch but are semantically after EOG and must be ignored.
                             task->n_processed_detokenized = n_generated_tokens_e;
                         }
-                        task->generated_text += sampled_str;
                         send_text = get_position_of_utf8(task->generated_text) == task->generated_text.size();
                         if (send_text && common_log_verbosity_thold > 5) {
                             SRV_DBG("rid %s | sampled str: %s\n", rid.c_str(), escape_string(sampled_str).c_str());
@@ -4744,6 +4761,7 @@ struct httpserver {
                                         // ignore reasoning start content if needed
                                         if (!reasoning_in_content) {
                                             task->generated_text.clear();
+                                    task->stream_token_offsets.clear(); // text shifted: per-token offsets invalid
                                         }
                                     }
                                     // finish reasoning analysis as not found any available start
@@ -4773,6 +4791,7 @@ struct httpserver {
                                                 task->generated_text_keep_pos = 0;
                                                 task->generated_text = task->generated_text.erase(
                                                     0, end_pos + reasoning_end_word.length());
+                                    task->stream_token_offsets.clear(); // text shifted: per-token offsets invalid
                                             }
                                             task->reasoning_finished = true;
                                         }
@@ -4819,6 +4838,7 @@ struct httpserver {
                                                         // eat the rest of the text
                                                         task->generated_text_keep_pos = std::string::npos;
                                                         task->generated_text.clear();
+                                    task->stream_token_offsets.clear(); // text shifted: per-token offsets invalid
                                                     }
                                                 } catch (const std::exception & e) {
                                                     // Preserve malformed model
@@ -4851,6 +4871,7 @@ struct httpserver {
                                                                     // trim the start word
                                                                     task->generated_text = task->generated_text.erase(
                                                                         sp, sp + sw.length());
+                                    task->stream_token_offsets.clear(); // text shifted: per-token offsets invalid
                                                                 }
                                                             }
                                                         }
@@ -4875,6 +4896,7 @@ struct httpserver {
                                                             // trim the start word
                                                             task->generated_text =
                                                                 task->generated_text.erase(sp, sp + sw.length());
+                                    task->stream_token_offsets.clear(); // text shifted: per-token offsets invalid
                                                         }
                                                         break;
                                                     }
@@ -4992,6 +5014,7 @@ struct httpserver {
                                                     // eat the rest of the text
                                                     task->generated_text_keep_pos = std::string::npos;
                                                     task->generated_text.clear();
+                                    task->stream_token_offsets.clear(); // text shifted: per-token offsets invalid
                                                 }
                                             } catch (const std::exception & e) {
                                                 task->generated_text_keep_pos = 0;
@@ -5027,9 +5050,26 @@ struct httpserver {
                     if (task->generated_finish_reason.empty()) {
                         // stream outputting
                         if (send_text && task_ptr->is_stream()) {
-                            json data = task->to_json(llm_ctx, reasoning_in_content);
-                            process_task_results[tid]->enqueue(
-                                std::make_unique<btask_result>(httplib::Continue_100, std::move(data)));
+                            // fine-grained streaming: emit one SSE chunk per token when the
+                            // per-token offsets are valid (pure-text generation). Falls back to
+                            // one batched chunk per decode round when word-mode/tool-call
+                            // handling has shifted the text (offsets invalidated).
+                            if (!task->stream_token_offsets.empty()) {
+                                size_t prev = 0;
+                                for (size_t off : task->stream_token_offsets) {
+                                    const size_t len = off - prev;  // bytes of this token
+                                    prev = off;
+                                    if (len == 0) continue;
+                                    json data = task->to_json(llm_ctx, reasoning_in_content, len);
+                                    process_task_results[tid]->enqueue(
+                                        std::make_unique<btask_result>(httplib::Continue_100, std::move(data)));
+                                }
+                                task->stream_token_offsets.clear();
+                            } else {
+                                json data = task->to_json(llm_ctx, reasoning_in_content);
+                                process_task_results[tid]->enqueue(
+                                    std::make_unique<btask_result>(httplib::Continue_100, std::move(data)));
+                            }
                         }
                         // speculative
                         if (!task->tokenized_prompts_include_multimedias) {
