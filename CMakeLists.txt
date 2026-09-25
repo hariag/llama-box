@@ -65,7 +65,12 @@ endif ()
 if (NOT DEFINED GGML_NATIVE)
     set(GGML_NATIVE OFF)
 endif ()
-add_definitions(-DGGML_MAX_NAME=128)
+if (NOT DEFINED GGML_RPC)
+    set(GGML_RPC ON CACHE BOOL "ggml: use RPC")
+endif ()
+# ggml_tensor is shared across llama.cpp and stable-diffusion.cpp; keep its
+# layout consistent with stable-diffusion.cpp's 160-byte tensor names.
+add_definitions(-DGGML_MAX_NAME=160)
 
 # change the default for these sd options
 if (BUILD_SHARED_LIBS)

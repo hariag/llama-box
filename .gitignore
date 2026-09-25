@@ -36,3 +36,4 @@ cmake-build-make-*/
 cmake-build-debug-make-*/
 cmake-build-release-make-*/
 build-arm64/
+build-cuda13/

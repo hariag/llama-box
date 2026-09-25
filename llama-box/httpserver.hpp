@@ -5902,6 +5902,20 @@ struct httpserver {
         /* STABLE DIFFUSION */
         if (support_image()) {
             std::pair<int, int> img_size = sd_ctx->get_default_image_size();
+            sample_method_t sample_method = params.sd_params.sampling.sample_method;
+            if (sample_method >= N_SAMPLE_METHODS) {
+                sample_method = sd_ctx->get_default_sample_method();
+            }
+            schedule_t schedule_method = params.sd_params.sampling.schedule_method;
+            if (schedule_method >= N_SCHEDULES) {
+                schedule_method = sd_ctx->get_default_scheduler(sample_method);
+            }
+            const int sampling_steps = params.sd_params.sampling.sampling_steps > 0
+                                           ? params.sd_params.sampling.sampling_steps
+                                           : sd_ctx->get_default_sampling_steps();
+            const float cfg_scale = params.sd_params.sampling.cfg_scale > 0.0f
+                                        ? params.sd_params.sampling.cfg_scale
+                                        : sd_ctx->get_default_cfg_scale();
             metadata_json                = {
                 { "n_slot", params.sd_params.n_parallel },
                 { "seed", int32_t(params.sd_params.sampling.seed) },
@@ -5912,14 +5926,14 @@ struct httpserver {
                 { "default_width", std::min(img_size.second, params.sd_params.sampling.width) },
                 { "guidance", params.sd_params.sampling.guidance },
                 { "strength", params.sd_params.sampling.strength },
-                { "sample_method", sd_sample_method_to_argument(params.sd_params.sampling.sample_method) },
-                { "sampling_steps", params.sd_params.sampling.sampling_steps },
-                { "cfg_scale", params.sd_params.sampling.cfg_scale },
+                { "sample_method", sd_sample_method_to_argument(sample_method) },
+                { "sampling_steps", sampling_steps },
+                { "cfg_scale", cfg_scale },
                 { "slg_scale", params.sd_params.sampling.slg_scale },
                 { "slg_skip_layers", params.sd_params.sampling.slg_skip_layers },
                 { "slg_start", params.sd_params.sampling.slg_start },
                 { "slg_end", params.sd_params.sampling.slg_end },
-                { "schedule_method", sd_schedule_to_argument(params.sd_params.sampling.schedule_method) },
+                { "schedule_method", sd_schedule_to_argument(schedule_method) },
                 { "negative_prompt", params.sd_params.sampling.negative_prompt },
             };
         }

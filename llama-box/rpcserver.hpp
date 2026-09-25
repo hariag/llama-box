@@ -1548,12 +1548,33 @@ struct rpcserver {
 };
 
 static int32_t start_rpcserver(rpcserver_params & params) {
-    rpcserver srv(params);
-
-    if (!srv.load()) {
-        SRV_ERR("%s", "failed to load\n");
+    // Use the llama.cpp ggml-rpc server implementation: it speaks the same wire
+    // protocol as the ggml-rpc client built into this binary. The legacy
+    // rpcserver class in this header predates the HELLO capability exchange and
+    // cannot interoperate with it.
+    ggml_backend_t backend = rpcserver_create_backend(params);
+    if (!backend) {
+        SRV_ERR("%s", "failed to create backend\n");
         return -1;
     }
-
-    return srv.start();
+    ggml_backend_dev_t dev = ggml_backend_get_device(backend);
+    std::string endpoint   = params.hostname + ":" + std::to_string(params.port);
+    SRV_INF("starting ggml-rpc server at %s\n", endpoint.c_str());
+    ggml_backend_reg_t rpc_reg = ggml_backend_reg_by_name("RPC");
+    if (rpc_reg == nullptr) {
+        SRV_ERR("%s", "RPC backend is unavailable\n");
+        return -1;
+    }
+    auto start_server = reinterpret_cast<decltype(&ggml_backend_rpc_start_server)>(
+        ggml_backend_reg_get_proc_address(rpc_reg, "ggml_backend_rpc_start_server"));
+    if (start_server == nullptr) {
+        SRV_ERR("%s", "RPC server function is unavailable\n");
+        return -1;
+    }
+    start_server(endpoint.c_str(),
+                 params.use_cache ? params.cache_dir.c_str() : nullptr,
+                 params.n_threads > 0 ? (size_t) params.n_threads : (size_t) std::thread::hardware_concurrency(),
+                 dev != nullptr ? 1u : 0u,
+                 dev != nullptr ? &dev : nullptr);
+    return 0;
 }
