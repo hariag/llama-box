@@ -40,7 +40,7 @@ static inline const char * sd_sample_method_to_argument(sample_method_t method) 
 
 static inline schedule_t sd_argument_to_schedule(const char * value) {
     if (value == nullptr || !strcmp(value, "default")) {
-        return DISCRETE;
+        return SCHEDULER_COUNT;
     }
     const auto scheduler = str_to_scheduler(value);
     if (scheduler == SCHEDULER_COUNT) {
@@ -50,6 +50,9 @@ static inline schedule_t sd_argument_to_schedule(const char * value) {
 }
 
 static inline const char * sd_schedule_to_argument(schedule_t scheduler) {
+    if (scheduler == SCHEDULER_COUNT) {
+        return "default";
+    }
     return sd_scheduler_name(scheduler);
 }
 
@@ -68,7 +71,7 @@ struct stablediffusion_params_sampling {
     std::vector<int> slg_skip_layers = { 7, 8, 9 };
     float            slg_start       = 0.01;
     float            slg_end         = 0.2;
-    schedule_t       schedule_method = DISCRETE;
+    schedule_t       schedule_method = SCHEDULER_COUNT;
     std::string      negative_prompt;
     float            control_strength   = 0.9f;
     bool             control_canny      = false;
@@ -164,6 +167,7 @@ class stablediffusion_context {
 
     float               get_default_strength();
     sample_method_t     get_default_sample_method();
+    schedule_t          get_default_scheduler(sample_method_t sample_method);
     int                 get_default_sampling_steps();
     float               get_default_cfg_scale();
     std::pair<int, int> get_default_image_size();
@@ -205,6 +209,13 @@ sample_method_t stablediffusion_context::get_default_sample_method() {
         return method;
     }
     return params.llm_model.empty() ? EULER_A : EULER;
+}
+
+schedule_t stablediffusion_context::get_default_scheduler(sample_method_t sample_method) {
+    if (sample_method >= N_SAMPLE_METHODS) {
+        sample_method = get_default_sample_method();
+    }
+    return sd_get_default_scheduler(sd_ctx, sample_method);
 }
 
 int stablediffusion_context::get_default_sampling_steps() {
