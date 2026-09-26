@@ -1770,8 +1770,24 @@ static inline std::unique_ptr<image_edit_req> get_image_edit_req(const httplib::
                                                                  const httpserver_params & hparams) {
     const stablediffusion_params & params = hparams.sd_params;
 
-    const std::string                     rid = response.get_header_value(HEADER_X_REQUEST_ID);
-    const httplib::FormFiles & req = request.form.files;
+    const std::string                       rid = response.get_header_value(HEADER_X_REQUEST_ID);
+    // OpenAI-compatible clients send text params (prompt, size, n, ...) as plain
+    // multipart fields (no filename), which cpp-httplib routes into form.fields,
+    // while this handler reads everything from form.files. Merge the plain
+    // fields into a files-view so both encodings are accepted.
+    httplib::FormFiles merged_files = request.form.files;
+    for (const auto & kv : request.form.fields) {
+        if (merged_files.find(kv.first) != merged_files.end()) {
+            continue;
+        }
+        httplib::FormData fd;
+        fd.name         = kv.first;
+        fd.content      = kv.second.content;
+        fd.filename     = kv.first;  // non-empty => routed as a "file" part
+        fd.content_type = "application/octet-stream";
+        merged_files.emplace(fd.name, fd);
+    }
+    const httplib::FormFiles & req = merged_files;
     if (req.find("prompt") == req.end()) {
         throw std::invalid_argument("Illegal param: \"prompt\" is required");
     } else if (req.find("image") == req.end()) {
