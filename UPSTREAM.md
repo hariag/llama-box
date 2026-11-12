@@ -60,3 +60,10 @@ To compare a candidate against an otherwise identical server started with
 --reference URL --require-hit`. Add `--require-mtp` for MTP and `--concurrency`
 when the candidate has at least two slots. The test sends requests to both
 servers and should be run against isolated test instances.
+
+For shared-KV saturation and eviction, run an isolated Qwen35 server with a
+1024-token context, eight slots, `--kv-unified`, and verbose logging, then run
+`tests/test_qwen_cache_saturation.py --url URL --server-log LOG`. The test
+checks that all eight slots were used, at least four idle slots were evicted,
+and a subsequent request can complete and be cached. Add `--disconnect` to
+exercise non-streaming cancellation while waiting for dynamic admission.

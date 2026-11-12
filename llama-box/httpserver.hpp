@@ -3735,6 +3735,7 @@ struct httpserver {
                     auto & entry = cache_prompts.at(i);
                     if (entry.used || entry.pos == 0) continue;
                     if (!clear_completion_sequence(i)) return;
+                    SRV_INF("evicted idle hybrid cache, seq = %d, tokens = %d\n", i, entry.pos);
                     llm_kv_cache_used -= entry.pos;
                     llm_kv_cache_inactive -= entry.pos;
                     entry.tokens.clear(); entry.invalidate_checkpoint();
@@ -3901,8 +3902,12 @@ struct httpserver {
                 };
             }
             decoded = llama_decode(input_ctx, input_batch_view);
-            for (int32_t retries = 3; decoded == 1 && retries > 0; retries--) {
+            // A hybrid cache can only evict whole idle sequences, one per
+            // attempt. Leave enough attempts to reclaim every idle slot.
+            const int32_t max_retries = hybrid_prompt_cache ? params.llm_params.n_threads_http + 3 : 3;
+            for (int32_t retries = max_retries; decoded == 1 && retries > 0; retries--) {
                 SRV_WRN("failed to decode in batch, try shifting kv cache within %d times\n", retries);
+                const int32_t used_before_reclaim = llm_kv_cache_used;
                 // find a task in the same batch who has largest pos and finished prefilling
                 completions_task * task       = nullptr;
                 int32_t            target_pos = -1;
@@ -3922,6 +3927,9 @@ struct httpserver {
                 // otherwise, shift the cache
                 else {
                     shift_completion_task_cache(nullptr);
+                }
+                if (hybrid_prompt_cache && llm_kv_cache_used >= used_before_reclaim) {
+                    break; // No idle sequence was reclaimed; retrying cannot make progress.
                 }
                 // decode again only while all hybrid sequence states are healthy
                 if (hybrid_cache_unhealthy) { decoded = -2; break; }
@@ -4132,6 +4140,16 @@ struct httpserver {
                                 continue;
                             }
                             if (admission == completion_admission_status::wait) {
+                                // A non-streaming handler is waiting for a terminal
+                                // result even after its client disconnects. Wake it
+                                // without consuming the budget or running prefill.
+                                if (!task->is_stream() && task->is_connection_closed()) {
+                                    SRV_INF("rid %s | cancelled while waiting for dynamic context admission\n", rid.c_str());
+                                    json data = { { "message", "client disconnected while waiting for context" } };
+                                    process_task_results[tid]->enqueue(
+                                        std::make_unique<btask_result>(httplib::RequestTimeout_408, std::move(data)));
+                                    continue;
+                                }
                                 SRV_DBG(
                                     "rid %s | batching, waiting dynamic context admission: "
                                     "active = %d, candidate_quota = %d, max_active_position = %d, "
