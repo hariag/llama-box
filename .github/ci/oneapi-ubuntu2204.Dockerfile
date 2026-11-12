@@ -9,6 +9,7 @@ COPY install-openssl3.sh /tmp/install-openssl3.sh
 RUN /bin/sh /tmp/install-openssl3.sh && rm /tmp/install-openssl3.sh
 ENV OPENSSL_ROOT_DIR=/opt/openssl3
 
-# CI replaces the image entrypoint, so the build script must source setvars.sh.
+# The official image already exports the oneAPI environment. Re-source only
+# if an alternate image has not initialized it; setvars returns 3 on repeats.
 RUN test -f /opt/intel/oneapi/setvars.sh \
-    && /bin/bash -c 'source /opt/intel/oneapi/setvars.sh >/dev/null && command -v icx && command -v icpx'
+    && /bin/bash -c 'if [ "${SETVARS_COMPLETED:-}" != 1 ]; then source /opt/intel/oneapi/setvars.sh >/dev/null || exit 1; fi; command -v icx && command -v icpx'
