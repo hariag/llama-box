@@ -679,7 +679,7 @@ jobs:
         include:
           - arch: 'amd64'
             version: 'rc4.2'
-            distro_container_image: 'gpustack/devel-mthreads-musa:rc4.2.0-ubuntu22.04-v2'
+            distro_container_image: 'llama-box-ci-musa:rc4.2'
             musa_arch: '21;22;31'
     runs-on: ${{ matrix.arch == 'amd64' && 'ubuntu-22.04' || 'ubuntu-22.04-arm' }}
     steps:
@@ -692,6 +692,8 @@ jobs:
         with:
           fetch-depth: 0
           submodules: 'recursive'
+      - name: Build Development Image
+        run: docker build -f .github/ci/musa-ubuntu2204.Dockerfile -t ${{ matrix.distro_container_image }} .github/ci
       - name: Setup Cache
         timeout-minutes: 5
         uses: actions/cache@v4
@@ -840,7 +842,7 @@ jobs:
         include:
           - arch: 'amd64'
             version: '6.2'
-            distro_container_image: 'gpustack/devel-rocm-hip:6.2.4-centos7-v2'
+            distro_container_image: 'llama-box-ci-rocm:6.2.4'
             hip_arch: 'gfx906:xnack-;gfx908:xnack-;gfx90a:xnack+;gfx90a:xnack-;gfx942;gfx1030;gfx1031;gfx1032;gfx1100;gfx1101;gfx1102'
     runs-on: ${{ matrix.arch == 'amd64' && 'ubuntu-22.04' || 'ubuntu-22.04-arm' }}
     steps:
@@ -853,6 +855,8 @@ jobs:
         with:
           fetch-depth: 0
           submodules: 'recursive'
+      - name: Build Development Image
+        run: docker build -f .github/ci/rocm-centos7.Dockerfile -t ${{ matrix.distro_container_image }} .github/ci
       - name: Setup Cache
         timeout-minutes: 5
         uses: actions/cache@v4

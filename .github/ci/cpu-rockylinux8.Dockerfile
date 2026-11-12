@@ -4,7 +4,7 @@ FROM rockylinux:8.9
 
 RUN dnf -y --enablerepo=powertools install \
       gcc-toolset-11-gcc gcc-toolset-11-gcc-c++ \
-      cmake make git patch which openblas-devel curl perl-core \
+      cmake make git patch which openblas-devel openblas-static curl perl-core \
       pkgconf-pkg-config tar gzip ca-certificates \
     && dnf clean all
 
