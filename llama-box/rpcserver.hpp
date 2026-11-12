@@ -719,7 +719,7 @@ struct rpcserver {
         }
         result->buffer = reinterpret_cast<ggml_backend_buffer_t>(tensor->buffer);
         if (result->buffer && buffers.find(result->buffer) == buffers.end()) {
-            if (common_log_verbosity_thold > 5) {
+            if (common_log_get_verbosity_thold() > 5) {
                 SRV_WRN(
                     "buffer not found, "
                     "id = %llu, name = %s, buffer = %p\n",

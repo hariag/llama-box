@@ -18,6 +18,7 @@
 #include "llama.cpp/common/ngram-cache.h"
 #include "llama.cpp/common/sampling.h"
 #include "llama.cpp/common/speculative.h"
+#include "llama.cpp/src/llama-ext.h"
 #include "llama.cpp/tools/mtmd/clip.h"
 #include "llama.cpp/vendor/cpp-httplib/httplib.h"
 #include "stable-diffusion.cpp/include/stable-diffusion.h"
@@ -569,9 +570,9 @@ static inline std::unique_ptr<tokenize_req> get_tokenize_req(const httplib::Requ
     }
 
     // print32_t the request for debugging
-    if (common_log_verbosity_thold > 1) {
+    if (common_log_get_verbosity_thold() > 1) {
         json req_cp = req;
-        if (common_log_verbosity_thold < 3) {
+        if (common_log_get_verbosity_thold() < 3) {
             req_cp["content"] = "...";
         }
         SRV_INF("rid %s | %s\n", rid.c_str(), req_cp.dump(-1, ' ', false, json::error_handler_t::replace).c_str());
@@ -614,9 +615,9 @@ static inline std::unique_ptr<detokenize_req> get_detokenize_req(const httplib::
     }
 
     // print32_t the request for debugging
-    if (common_log_verbosity_thold > 1) {
+    if (common_log_get_verbosity_thold() > 1) {
         json req_cp = req;
-        if (common_log_verbosity_thold < 3) {
+        if (common_log_get_verbosity_thold() < 3) {
             req_cp["tokens"] = "...";
         }
         SRV_INF("rid %s | %s\n", rid.c_str(), req_cp.dump(-1, ' ', false, json::error_handler_t::replace).c_str());
@@ -695,9 +696,9 @@ static inline std::unique_ptr<legacy_complete_req> get_legacy_complete_req(const
     }
 
     // print32_t the request for debugging
-    if (common_log_verbosity_thold > 1) {
+    if (common_log_get_verbosity_thold() > 1) {
         json req_cp = req;
-        if (common_log_verbosity_thold < 3) {
+        if (common_log_get_verbosity_thold() < 3) {
             req_cp["prompt"] = "...";
         }
         SRV_INF("rid %s | %s\n", rid.c_str(), req_cp.dump(-1, ' ', false, json::error_handler_t::replace).c_str());
@@ -954,9 +955,9 @@ static inline std::unique_ptr<chat_complete_req> get_chat_complete_req(
     }
 
     // print32_t the request for debugging
-    if (common_log_verbosity_thold > 1) {
+    if (common_log_get_verbosity_thold() > 1) {
         json req_cp = req;
-        if (common_log_verbosity_thold < 3) {
+        if (common_log_get_verbosity_thold() < 3) {
             req_cp["messages"] = "...";
         }
         SRV_INF("rid %s | %s\n", rid.c_str(), req_cp.dump(-1, ' ', false, json::error_handler_t::replace).c_str());
@@ -1474,9 +1475,9 @@ static inline std::unique_ptr<embed_req> get_embed_req(const httplib::Request & 
     }
 
     // print32_t the request for debugging
-    if (common_log_verbosity_thold > 1) {
+    if (common_log_get_verbosity_thold() > 1) {
         json req_cp = req;
-        if (common_log_verbosity_thold < 3) {
+        if (common_log_get_verbosity_thold() < 3) {
             req_cp["input"] = "[...]";
         }
         SRV_INF("rid %s | %s\n", rid.c_str(), req_cp.dump(-1, ' ', false, json::error_handler_t::replace).c_str());
@@ -1530,9 +1531,9 @@ static inline std::unique_ptr<rerank_req> get_rerank_req(const httplib::Request 
     }
 
     // print32_t the request for debugging
-    if (common_log_verbosity_thold > 1) {
+    if (common_log_get_verbosity_thold() > 1) {
         json req_cp = req;
-        if (common_log_verbosity_thold < 3) {
+        if (common_log_get_verbosity_thold() < 3) {
             req_cp["query"]     = "...";
             req_cp["documents"] = "...";
         }
@@ -1621,9 +1622,9 @@ static inline std::unique_ptr<image_generate_req> get_image_generate_req(const h
     }
 
     // print32_t the request for debugging
-    if (common_log_verbosity_thold > 1) {
+    if (common_log_get_verbosity_thold() > 1) {
         json req_cp = req;
-        if (common_log_verbosity_thold < 3) {
+        if (common_log_get_verbosity_thold() < 3) {
             req_cp["prompt"] = "...";
         }
         SRV_INF("rid %s | %s\n", rid.c_str(), req_cp.dump(-1, ' ', false, json::error_handler_t::replace).c_str());
@@ -1812,7 +1813,7 @@ static inline std::unique_ptr<image_edit_req> get_image_edit_req(const httplib::
     }
 
     // print32_t the request for debugging
-    if (common_log_verbosity_thold > 1) {
+    if (common_log_get_verbosity_thold() > 1) {
         json req_cp = json::object();
         for (const auto & el : req) {
             if (el.first == "image" || el.first == "mask" || el.first == "control") {
@@ -1821,7 +1822,7 @@ static inline std::unique_ptr<image_edit_req> get_image_edit_req(const httplib::
                 req_cp[el.first] = el.second.content;
             }
         }
-        if (common_log_verbosity_thold < 3) {
+        if (common_log_get_verbosity_thold() < 3) {
             req_cp["prompt"] = "...";
         }
         SRV_INF("rid %s | %s\n", rid.c_str(), req_cp.dump(-1, ' ', false, json::error_handler_t::replace).c_str());
@@ -2851,7 +2852,34 @@ struct httpserver {
         mtp_enabled = std::find(params.llm_params.speculative.types.begin(),
                                 params.llm_params.speculative.types.end(),
                                 COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params.llm_params.speculative.types.end();
-        if (!mtp_enabled && !params.llm_params.speculative.draft.mparams.path.empty() && params.llm_params.speculative.draft.n_max > 0) {
+        const auto & spec_types = params.llm_params.speculative.types;
+        const bool dflash_enabled = std::find(spec_types.begin(), spec_types.end(),
+                                              COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH) != spec_types.end();
+        const bool dspark_enabled = std::find(spec_types.begin(), spec_types.end(),
+                                               COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK) != spec_types.end();
+        const bool block_spec_enabled = dflash_enabled || dspark_enabled;
+        if (block_spec_enabled && (mtp_enabled || (dflash_enabled && dspark_enabled) ||
+            std::any_of(spec_types.begin(), spec_types.end(), [](common_speculative_type type) {
+                return type != COMMON_SPECULATIVE_TYPE_NONE && type != COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH &&
+                       type != COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK;
+            }))) {
+            SRV_ERR("%s", "DFlash/DSpark cannot be combined with other speculative types\n");
+            return false;
+        }
+        if (block_spec_enabled && params.llm_params.speculative.draft.mparams.path.empty()) {
+            SRV_ERR("%s", "DFlash/DSpark requires a draft model (--model-draft)\n");
+            return false;
+        }
+        if (block_spec_enabled && params.llm_params.model.path.empty()) {
+            SRV_ERR("%s", "DFlash/DSpark requires a target model (--model)\n");
+            return false;
+        }
+        if (block_spec_enabled && (llm_ctx_clip_v || llm_ctx_clip_a)) {
+            SRV_ERR("%s", "DFlash/DSpark multimodal prefill is not supported by this server\n");
+            return false;
+        }
+        const bool common_spec_enabled = mtp_enabled || block_spec_enabled;
+        if (!common_spec_enabled && !params.llm_params.speculative.draft.mparams.path.empty() && params.llm_params.speculative.draft.n_max > 0) {
             SRV_INF("loading draft model '%s'\n", params.llm_params.speculative.draft.mparams.path.c_str());
 
             common_params llm_params_draft         = params.llm_params;
@@ -2879,7 +2907,7 @@ struct httpserver {
 
         common_params llm_params = params.llm_params;
         llm_params.n_parallel    = params.llm_params.n_threads_http;
-        if (mtp_enabled) {
+        if (common_spec_enabled) {
             const int32_t n_outputs_per_seq = 1 + common_speculative_n_max(&llm_params.speculative);
             const int64_t n_outputs = int64_t(llm_params.n_parallel) * n_outputs_per_seq;
             llm_params.n_outputs_max = std::max<int32_t>(
@@ -2920,29 +2948,94 @@ struct httpserver {
         llm_model_rope_mrope = rope_type == LLAMA_ROPE_TYPE_MROPE || rope_type == LLAMA_ROPE_TYPE_IMROPE;
         llm_model_n_swa      = llama_model_n_swa(llm_model);
         llm_model_arch_name  = llama_model_arch_name(llm_model);  // llama_model_arch_name is a patch.
-        batch_view_max       = int32_t(llama_n_batch(llm_ctx));
+        // DFlash/DSpark consumes target layer features after each decode. A
+        // multi-ubatch decode only exposes the last ubatch's features.
+        batch_view_max       = block_spec_enabled ? int32_t(llama_n_ubatch(llm_ctx)) : int32_t(llama_n_batch(llm_ctx));
+        if (block_spec_enabled && (params.llm_params.speculative.draft.n_max <= 0 ||
+                                   params.llm_params.speculative.draft.n_max >= batch_view_max)) {
+            SRV_ERR("DFlash/DSpark draft size must be positive and less than ubatch size %d\n", batch_view_max);
+            return false;
+        }
         batch_text           = llama_batch_init(llm_ctx_size, 0, 1);
         batch_text_temp      = llama_batch_init(llm_ctx_size, 0, 1);
 
-        if (mtp_enabled) {
+        if (block_spec_enabled) {
+            const auto rm_type = common_context_can_seq_rm(llm_ctx);
+            // Recurrent snapshots support rollback up to n_rs_seq tokens. The
+            // verification batch contains at most n_max draft tokens, so it
+            // stays within this bound without a checkpoint/replay path.
+            const bool bounded_rollback = rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS &&
+                llama_n_rs_seq(llm_ctx) >= uint32_t(params.llm_params.speculative.draft.n_max) &&
+                llama_n_ubatch(llm_ctx) > llama_n_rs_seq(llm_ctx) + 1;
+            if (rm_type != COMMON_CONTEXT_SEQ_RM_TYPE_PART && !bounded_rollback) {
+                SRV_ERR("%s", "DFlash/DSpark requires partial or sufficiently bounded sequence rollback\n");
+                return false;
+            }
+        }
+        if (common_spec_enabled) {
             common_params llm_params_mtp = common_base_params_to_speculative(llm_params);
             try {
                 spec_init       = common_speculative_init_from_params(llm_params_mtp, llm_model, llm_ctx);
                 llm_ctx_draft   = spec_init ? spec_init->context() : nullptr;
                 if (llm_ctx_draft == nullptr) {
-                    SRV_ERR("failed to create MTP context for model, '%s'\n", params.llm_params.model.path.c_str());
+                    SRV_ERR("failed to create speculative draft context for model, '%s'\n", params.llm_params.model.path.c_str());
                     return false;
                 }
 
+                if (block_spec_enabled) {
+                    const llama_model * draft_model = llama_get_model(llm_ctx_draft);
+                    char draft_arch[32] = {};
+                    if (llama_model_meta_val_str(draft_model, "general.architecture", draft_arch, sizeof(draft_arch)) < 0 ||
+                        std::string(draft_arch) != "dflash") {
+                        SRV_ERR("%s", "DFlash/DSpark requires a dflash architecture draft model\n");
+                        return false;
+                    }
+                    const auto detected = common_speculative_types_from_gguf(params.llm_params.speculative.draft.mparams.path);
+                    const auto expected = dspark_enabled ? COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK : COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH;
+                    if (detected.size() != 1 || detected[0] != expected) {
+                        SRV_ERR("%s", "DFlash/DSpark draft model does not match the selected speculative type\n");
+                        return false;
+                    }
+                    const llama_vocab * draft_vocab = llama_model_get_vocab(draft_model);
+                    const int32_t vocab_size = llama_vocab_n_tokens(llm_vocab);
+                    bool vocab_compatible = llama_model_n_embd(draft_model) == llama_model_n_embd(llm_model) &&
+                        llama_vocab_n_tokens(draft_vocab) >= vocab_size &&
+                        common_speculative_are_compatible(llm_model, draft_model);
+                    for (int32_t i = 0; vocab_compatible && i < vocab_size; ++i) {
+                        const char * target_text = llama_vocab_get_text(llm_vocab, i);
+                        const char * draft_text = llama_vocab_get_text(draft_vocab, i);
+                        vocab_compatible = target_text && draft_text && std::strcmp(target_text, draft_text) == 0 &&
+                            llama_vocab_get_attr(llm_vocab, i) == llama_vocab_get_attr(draft_vocab, i);
+                    }
+                    if (!vocab_compatible) {
+                        SRV_ERR("%s", "DFlash/DSpark target and draft vocabularies or embedding sizes differ\n");
+                        return false;
+                    }
+                    const auto * layer_ids = llama_model_target_layer_ids(draft_model);
+                    const uint32_t n_layers = llama_model_target_layer_ids_n(draft_model);
+                    bool valid_layers = layer_ids && n_layers > 0;
+                    for (uint32_t i = 0; valid_layers && i < n_layers; ++i) {
+                        valid_layers = layer_ids[i] >= 0 && layer_ids[i] < llama_model_n_layer(llm_model);
+                    }
+                    if (!valid_layers) {
+                        SRV_ERR("%s", "DFlash/DSpark draft model has invalid target layer ids\n");
+                        return false;
+                    }
+                }
                 llm_params_mtp.speculative.draft.ctx_tgt = llm_ctx;
                 llm_params_mtp.speculative.draft.ctx_dft = llm_ctx_draft;
                 spec.reset(common_speculative_init(llm_params_mtp.speculative, llm_params.n_parallel));
+                if (block_spec_enabled && llm_kv_cache_shift &&
+                    !llama_memory_can_shift(llama_get_memory(llm_ctx_draft))) {
+                    llm_kv_cache_shift = false;
+                    SRV_WRN("%s", "draft context cannot shift; disabling context shifting and shift-based prompt cache\n");
+                }
                 if (!spec) {
-                    SRV_ERR("%s", "failed to initialize MTP speculative decoding context\n");
+                    SRV_ERR("%s", "failed to initialize speculative decoding context\n");
                     return false;
                 }
             } catch (const std::exception & e) {
-                SRV_ERR("failed to initialize MTP speculative decoding context: %s\n", e.what());
+                SRV_ERR("failed to initialize speculative decoding context: %s\n", e.what());
                 return false;
             }
         }
@@ -3664,7 +3757,9 @@ struct httpserver {
             (void) tid;
             const int32_t position = completion_task_position(active_task);
             max_position          = std::max(max_position, position);
-            positions.push_back(position);
+            // A generating task has one sampled token awaiting verification.
+            // Keep at least one output slot when a new admission shrinks its quota.
+            positions.push_back(position + (active_task->n_decoded > 0 && position < INT32_MAX ? 1 : 0));
         }
 
         if (!llama_box::dynamic_context_quota::positions_fit(positions, quota) ||
@@ -3726,6 +3821,28 @@ struct httpserver {
         return tgt_ok && dft_ok;
     }
 
+    // A failed speculative rollback invalidates this slot.  Never return it to
+    // the prompt cache, and stop serving if even a full sequence clear fails.
+    inline void fail_speculative_sequence(completions_task * task, int32_t tracked_tokens, const char * message) {
+        const int32_t seq_id = task->get_seq_id();
+        if (!clear_completion_sequence(seq_id)) {
+            hybrid_cache_unhealthy = true;
+            SRV_ERR("failed to clear sequence %d after speculative rollback error; restart required\n", seq_id);
+        }
+        if (cache_prompt) {
+            auto & cache = cache_prompts.at(seq_id);
+            cache.tokens.clear();
+            cache.invalidate_checkpoint();
+            cache.used = false;
+            cache.pos = cache.pos_discard = 0;
+        }
+        llm_kv_cache_used -= tracked_tokens;
+        json data = { { "message", message } };
+        process_task_results[task->get_id()]->enqueue(
+            std::make_unique<btask_result>(httplib::InternalServerError_500, std::move(data)));
+        release_completion_task(task);
+    }
+
     inline void shift_completion_task_cache(completions_task * task) {
         if (!llm_kv_cache_shift) {
             // A hybrid prefix cannot be shifted, but an idle slot can be evicted
@@ -3769,14 +3886,24 @@ struct httpserver {
                     llama_memory_seq_add(llama_get_memory(llm_ctx), cache_id, n_keep + n_discard, cache_pos,
                                          -n_discard);
                     if (llm_ctx_draft != nullptr) {
-                        llama_memory_seq_rm(llama_get_memory(llm_ctx_draft), cache_id, n_keep, n_keep + n_discard);
+                        if (!llama_memory_seq_rm(llama_get_memory(llm_ctx_draft), cache_id, n_keep, n_keep + n_discard)) {
+                            // The target was already shifted. Clear both sides rather
+                            // than retain an idle prompt with mismatched positions.
+                            if (!clear_completion_sequence(cache_id)) hybrid_cache_unhealthy = true;
+                            auto & cache = cache_prompts.at(cache_id);
+                            cache.tokens.clear(); cache.invalidate_checkpoint();
+                            cache.pos = cache.pos_discard = 0;
+                            llm_kv_cache_used -= cache_pos;
+                            llm_kv_cache_inactive -= cache_pos;
+                            return;
+                        }
                         llama_memory_seq_add(llama_get_memory(llm_ctx_draft), cache_id, n_keep + n_discard, cache_pos,
                                              -n_discard);
                     }
                 } else {
-                    llama_memory_seq_rm(llama_get_memory(llm_ctx), cache_id, -1, -1);
-                    if (llm_ctx_draft != nullptr) {
-                        llama_memory_seq_rm(llama_get_memory(llm_ctx_draft), cache_id, -1, -1);
+                    if (!clear_completion_sequence(cache_id)) {
+                        hybrid_cache_unhealthy = true;
+                        return;
                     }
                     n_discard = cache_pos;
                 }
@@ -3810,10 +3937,18 @@ struct httpserver {
         const std::string rid    = task->get_r_id();
         const int32_t     seq_id = task->get_seq_id();
 
-        llama_memory_seq_rm(llama_get_memory(llm_ctx), seq_id, n_keep, n_keep + n_discard);
+        const bool tgt_ok = llama_memory_seq_rm(llama_get_memory(llm_ctx), seq_id, n_keep, n_keep + n_discard);
+        const bool dft_ok = !llm_ctx_draft ||
+            llama_memory_seq_rm(llama_get_memory(llm_ctx_draft), seq_id, n_keep, n_keep + n_discard);
+        if (!tgt_ok || !dft_ok) {
+            // The decode path observes this flag, fails the request and clears
+            // its sequence instead of continuing with misaligned KV positions.
+            hybrid_cache_unhealthy = true;
+            SRV_ERR("rid %s | failed to shift speculative sequence; restart required\n", rid.c_str());
+            return;
+        }
         llama_memory_seq_add(llama_get_memory(llm_ctx), seq_id, n_keep + n_discard, task->pos, -n_discard);
         if (llm_ctx_draft != nullptr) {
-            llama_memory_seq_rm(llama_get_memory(llm_ctx_draft), seq_id, n_keep, n_keep + n_discard);
             llama_memory_seq_add(llama_get_memory(llm_ctx_draft), seq_id, n_keep + n_discard, task->pos, -n_discard);
         }
         SRV_WRN(
@@ -4293,8 +4428,14 @@ struct httpserver {
                             if (llm_ctx_draft != nullptr) {
                                 cache_trim_ok = llama_memory_seq_rm(llama_get_memory(llm_ctx_draft), seq_id, task->pos, -1) && cache_trim_ok;
                             }
-                            if (hybrid_prompt_cache && !cache_trim_ok) {
-                                clear_completion_sequence(seq_id);
+                            if (!cache_trim_ok) {
+                                // Neither target nor draft may retain a partially
+                                // trimmed prefix when one side failed. Fall back to
+                                // a fresh prefill only after both sequences clear.
+                                if (!clear_completion_sequence(seq_id)) hybrid_cache_unhealthy = true;
+                                cache.tokens.clear();
+                                cache.invalidate_checkpoint();
+                                cache.pos_discard = 0;
                                 task->pos = task->n_prefilled = task->n_prefilled_cached = task->n_processed_detokenized = 0;
                             }
                             if (hybrid_prompt_cache && task->pos == 0) {
@@ -4539,6 +4680,12 @@ struct httpserver {
                             shift_completion_task_cache(task);
                         }
 
+                        // A later admission can reduce a task's dynamic quota after
+                        // it drafted tokens. Only verify what still fits the budget.
+                        const size_t remaining_drafts = size_t(std::max(0, task->n_decoding_budget - 1));
+                        if (task->drafted_tokens.size() > remaining_drafts) {
+                            task->drafted_tokens.resize(remaining_drafts);
+                        }
                         // batching
                         common_batch_add(batch_text, task->processed_tokens.back(), task->pos, { seq_id }, true);
                         task->pos++;
@@ -4768,7 +4915,11 @@ struct httpserver {
                     const int32_t     tid    = task->get_id();
                     const std::string rid    = task->get_r_id();
                     const int32_t     seq_id = task->get_seq_id();
-                    if (mtp_enabled && spec != nullptr && task->n_decoded == 0) {
+                    if (hybrid_cache_unhealthy) {
+                        fail_speculative_sequence(task, task->pos, "cache state is unhealthy; restart the model server");
+                        continue;
+                    }
+                    if (spec != nullptr && task->n_decoded == 0) {
                         common_speculative_begin(spec.get(), seq_id, task->processed_tokens);
                     }
                     // sample token
@@ -4784,40 +4935,47 @@ struct httpserver {
                     //// include drafted tokens
                     else {
                         uint16_t n_drafted_accepted = 0;
+                        bool rollback_failed = false;
+                        int32_t rollback_tracked_tokens = 0;
                         // +1 for main model decoded token
                         for (int32_t j = 0, s = int32_t(task->drafted_tokens.size()); j < s + 1; ++j) {
-                            // greedy verification only
                             const int32_t     tok_idx = task->i_batch_seq_end - s + j;
                             const llama_token tok     = common_sampler_sample(task->sampler, llm_ctx, tok_idx, false);
                             common_sampler_accept(task->sampler, tok, true);
                             task->push_generated_token(llm_ctx, tok_idx, tok);
                             task->n_decoded++;
                             task->n_decoding_budget--;
+                            const bool is_eog = llama_vocab_is_eog(llm_vocab, tok);
                             if (j < s) {
-                                if (tok != task->drafted_tokens[j]) {
-                                    int32_t d = s - j;
-                                    // back pos to the correct position
+                                const bool accepted = tok == task->drafted_tokens[j];
+                                if (accepted) {
+                                    task->n_drafted_accepted++;
+                                    n_drafted_accepted++;
+                                }
+                                if (!accepted || is_eog) {
+                                    const int32_t d = s - j;
                                     task->pos -= d;
-                                    // stats drafted tokens size
-                                    task->n_decoded += d;
-                                    task->n_decoding_budget -= d;
-                                    // clean kv cache
-                                    llama_memory_seq_rm(llama_get_memory(llm_ctx), seq_id, task->pos, -1);
-                                    if (llm_ctx_draft != nullptr) {
+                                    const bool tgt_ok = llama_memory_seq_rm(llama_get_memory(llm_ctx), seq_id, task->pos, -1);
+                                    const bool dft_ok = !llm_ctx_draft ||
                                         llama_memory_seq_rm(llama_get_memory(llm_ctx_draft), seq_id, task->pos, -1);
+                                    if (!tgt_ok || !dft_ok) {
+                                        rollback_failed = true;
+                                        rollback_tracked_tokens = task->pos + d;
+                                        break;
                                     }
-                                    SRV_INFV(2,
-                                             "rid %s | decode, "
-                                             "clean kv cache, seq %d = [%d, end)\n",
+                                    SRV_INFV(2, "rid %s | decode, clean kv cache, seq %d = [%d, end)\n",
                                              rid.c_str(), seq_id, task->pos);
                                     llm_kv_cache_used -= d;
                                     break;
                                 }
-                                task->n_drafted_accepted++;
-                                n_drafted_accepted++;
                             }
+                            if (is_eog) break;
                         }
-                        if (mtp_enabled && spec != nullptr) {
+                        if (rollback_failed) {
+                            fail_speculative_sequence(task, rollback_tracked_tokens, "failed to roll back speculative sequence");
+                            continue;
+                        }
+                        if (spec != nullptr) {
                             common_speculative_accept(spec.get(), seq_id, n_drafted_accepted);
                         }
                     }
@@ -4928,7 +5086,7 @@ struct httpserver {
                             task->n_processed_detokenized = n_generated_tokens_e;
                         }
                         send_text = get_position_of_utf8(task->generated_text) == task->generated_text.size();
-                        if (send_text && common_log_verbosity_thold > 5) {
+                        if (send_text && common_log_get_verbosity_thold() > 5) {
                             SRV_DBG("rid %s | sampled str: %s\n", rid.c_str(), escape_string(sampled_str).c_str());
                         }
                         // check stop
@@ -5273,7 +5431,7 @@ struct httpserver {
                         if (!task->tokenized_prompts_include_multimedias) {
                             task->drafted_tokens.clear();
                             //// draft
-                            if (mtp_enabled && spec != nullptr) {
+                            if (spec != nullptr) {
                                 const int32_t n_draft_max = std::min(
                                     params.llm_params.speculative.draft.n_max,
                                     std::max(0, task->n_decoding_budget - 1));
@@ -5286,13 +5444,19 @@ struct httpserver {
                                         /* .prompt   = */ &task->processed_tokens,
                                         /* .result   = */ &task->drafted_tokens,
                                     };
-                                    common_speculative_draft(spec.get());
+                                    if (!common_speculative_draft(spec.get())) {
+                                        fail_speculative_sequence(task, task->pos, "failed to generate speculative draft");
+                                        continue;
+                                    }
                                     // The MTP draft context is only a staging context for
                                     // speculative tokens.  Keep its KV cache aligned with
                                     // the target context before the next target decode; the
                                     // upstream server performs the same rollback after each
                                     // draft round.
-                                    llama_memory_seq_rm(llama_get_memory(llm_ctx_draft), seq_id, task->pos, -1);
+                                    if (!llama_memory_seq_rm(llama_get_memory(llm_ctx_draft), seq_id, task->pos, -1)) {
+                                        fail_speculative_sequence(task, task->pos, "failed to roll back speculative draft");
+                                        continue;
+                                    }
                                     task->n_drafted += int32_t(task->drafted_tokens.size());
                                 }
                             } else if (draft_batch_initialized) {
@@ -5764,7 +5928,7 @@ struct httpserver {
                 result = tokenize_image(llm_ctx_clip_v, params.llm_params.cpuparams.n_threads, mtmd->ptr.get(),
                                         params.max_image_size);
             }
-            if (common_log_verbosity_thold >= 2) {
+            if (common_log_get_verbosity_thold() >= 2) {
                 int32_t n_tokens     = 0;
                 int32_t n_pos        = 0;
                 size_t  n_embed_size = 0;
@@ -5783,7 +5947,7 @@ struct httpserver {
         else if (auto hit = cache_multimodals.find(mtmd->hash); hit != cache_multimodals.end()) {
             hit->second.last_used = ggml_time_us();
             result                = hit->second.tokens;
-            if (common_log_verbosity_thold >= 2) {
+            if (common_log_get_verbosity_thold() >= 2) {
                 int32_t n_tokens     = 0;
                 int32_t n_pos        = 0;
                 size_t  n_embed_size = 0;
@@ -5811,7 +5975,7 @@ struct httpserver {
                     }
                 }
                 auto oldest_mtmd = oldest_it->second.tokens;
-                if (common_log_verbosity_thold >= 2) {
+                if (common_log_get_verbosity_thold() >= 2) {
                     int32_t n_tokens     = 0;
                     int32_t n_pos        = 0;
                     size_t  n_embed_size = 0;
@@ -5845,7 +6009,7 @@ struct httpserver {
                 result = tokenize_image(llm_ctx_clip_v, params.llm_params.cpuparams.n_threads, mtmd->ptr.get(),
                                         params.max_image_size);
             }
-            if (common_log_verbosity_thold >= 2) {
+            if (common_log_get_verbosity_thold() >= 2) {
                 int32_t n_tokens     = 0;
                 int32_t n_pos        = 0;
                 size_t  n_embed_size = 0;
@@ -6652,9 +6816,23 @@ struct httpserver {
                 }
                 //// audio
                 else {
+                    // Gemma 4 audio projectors require the same delimiters as mtmd.
+                    if (clip_get_projector_type(llm_ctx_clip_a) == PROJECTOR_TYPE_GEMMA4A ||
+                        clip_get_projector_type(llm_ctx_clip_a) == PROJECTOR_TYPE_GEMMA4UA) {
+                        llama_tokens tokenized_text = common_tokenize(llm_vocab, "<|audio>", add_bos, true);
+                        n_prefilling_request += int32_t(tokenized_text.size());
+                        tokenized_prompts.emplace_back(std::move(tokenized_text));
+                        for (llama_multimodal_tokens & tokenized_mtmd : tokenized_mtmds) {
+                            n_prefilling_request += int32_t(tokenized_mtmd.n_pos);
+                            tokenized_prompts.emplace_back(std::move(tokenized_mtmd));
+                        }
+                        tokenized_text = common_tokenize(llm_vocab, "<audio|>", false, true);
+                        n_prefilling_request += int32_t(tokenized_text.size());
+                        tokenized_prompts.emplace_back(std::move(tokenized_text));
+                    }
                     // qwen2 audio
                     // NB(thxCode): clip_is_qwen2a is a patch.
-                    if (clip_is_qwen2a(llm_ctx_clip_a)) {
+                    else if (clip_is_qwen2a(llm_ctx_clip_a)) {
                         // format:
                         // <|audio_bos|> (audio) <|audio_eos|>
 

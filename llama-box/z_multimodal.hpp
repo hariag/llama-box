@@ -11,7 +11,28 @@
 #include <utility>
 #include <variant>
 
+#include "llama.cpp/common/log.h"
+// clip-impl.h defines private LOG_* macros; restore the common logger macros
+// so llama-box does not reference mtmd's internal logger data across DLLs.
+#pragma push_macro("LOG_TRC")
+#pragma push_macro("LOG_DBG")
+#pragma push_macro("LOG_INF")
+#pragma push_macro("LOG_WRN")
+#pragma push_macro("LOG_ERR")
+#pragma push_macro("LOG_CNT")
+#undef LOG_TRC
+#undef LOG_DBG
+#undef LOG_INF
+#undef LOG_WRN
+#undef LOG_ERR
+#undef LOG_CNT
 #include "llama.cpp/tools/mtmd/clip-impl.h"
+#pragma pop_macro("LOG_CNT")
+#pragma pop_macro("LOG_ERR")
+#pragma pop_macro("LOG_WRN")
+#pragma pop_macro("LOG_INF")
+#pragma pop_macro("LOG_DBG")
+#pragma pop_macro("LOG_TRC")
 #include "llama.cpp/tools/mtmd/mtmd-audio.h"
 #include "llama.cpp/tools/mtmd/mtmd-helper.h"
 #include "llama.cpp/tools/mtmd/mtmd-image.h"
