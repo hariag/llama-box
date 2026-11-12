@@ -1,5 +1,6 @@
-# Keep the original Rocky 8 glibc baseline and CUDA 12.8 toolkit version.
-FROM nvidia/cuda:12.8.0-devel-rockylinux8
+# Keep the original Rocky 8 glibc baseline and requested CUDA toolkit version.
+ARG CUDA_VERSION=12.8.0
+FROM nvidia/cuda:${CUDA_VERSION}-devel-rockylinux8
 
 RUN dnf -y install \
       gcc-toolset-11-gcc gcc-toolset-11-gcc-c++ \
