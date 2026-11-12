@@ -244,13 +244,13 @@ jobs:
         include:
           - arch: 'amd64'
             instruction: 'avx2'
-            distro_container_image: 'gpustack/devel-cpu:centos7-v2'
+            distro_container_image: 'llama-box-ci/cpu-centos7:local'
           - arch: 'amd64'
             instruction: 'avx512'
             distro_container_image: 'llama-box-ci/cpu-rockylinux8:local'
           - arch: 'arm64'
             instruction: 'neon'
-            distro_container_image: 'gpustack/devel-cpu:ubuntu18.04-v2'
+            distro_container_image: 'llama-box-ci/cpu-ubuntu1804:local'
     runs-on: ${{ matrix.arch == 'amd64' && 'ubuntu-22.04' || 'ubuntu-22.04-arm' }}
     steps:
       - name: Maximize Root Space
@@ -289,6 +289,7 @@ jobs:
           env || true
           cmake -S ${{ github.workspace }} -B ${{ github.workspace }}/build -DCMAKE_BUILD_TYPE=Release \
             -DBOX_PATCH_CI=on \
+            -DCMAKE_EXE_LINKER_FLAGS='-static-libgcc -static-libstdc++' \
             -DGGML_NATIVE=off \
             ${{ matrix.instruction == 'avx2' && '-DGGML_AVX=on -DGGML_AVX_VNNI=off -DGGML_AVX2=on' || '' }} \
             ${{ matrix.instruction == 'avx512' && '-DGGML_AVX512=on -DGGML_AVX512_BF16=off -DGGML_AVX512_VBMI=on -DGGML_AVX512_VNNI=on' || '' }} \
@@ -323,6 +324,12 @@ jobs:
           if [ "${{ matrix.distro_container_image }}" = "llama-box-ci/cpu-rockylinux8:local" ]; then
             docker build -f .github/ci/cpu-rockylinux8.Dockerfile \
               -t llama-box-ci/cpu-rockylinux8:local .github/ci
+          elif [ "${{ matrix.distro_container_image }}" = "llama-box-ci/cpu-centos7:local" ]; then
+            docker build -f .github/ci/cpu-centos7.Dockerfile \
+              -t llama-box-ci/cpu-centos7:local .github/ci
+          elif [ "${{ matrix.distro_container_image }}" = "llama-box-ci/cpu-ubuntu1804:local" ]; then
+            docker build -f .github/ci/cpu-ubuntu1804.Dockerfile \
+              -t llama-box-ci/cpu-ubuntu1804:local .github/ci
           fi
 
           docker run \
