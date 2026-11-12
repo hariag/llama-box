@@ -1,13 +1,17 @@
-# CANN 8.2.RC1 on the original Ubuntu 20.04/glibc 2.31 ABI.
+# CANN 8.1/8.2 RC1 on the original Ubuntu 20.04/glibc 2.31 ABI.
 # Official packages and verification key are downloaded independently for
-# each architecture and chip variant. CANN 8.1 beta remains a separate job.
+# each architecture and chip variant. GPUStack historically resolved the
+# 8.1.rc1.beta1 label to the vendor 8.1.RC1 download URL; the present file
+# cannot be proven identical to the package downloaded historically.
 FROM ubuntu:20.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG CANN_ARCH
 ARG CANN_CHIP
+ARG CANN_VERSION
 RUN case "$CANN_ARCH" in x86_64|aarch64) ;; *) echo 'unsupported CANN_ARCH' >&2; exit 1;; esac \
     && case "$CANN_CHIP" in 910b|310p) ;; *) echo 'unsupported CANN_CHIP' >&2; exit 1;; esac \
+    && case "$CANN_VERSION" in 8.1.RC1|8.2.RC1) ;; *) echo 'unsupported CANN_VERSION' >&2; exit 1;; esac \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
       gcc-11 g++-11 build-essential cmake git patch pkg-config curl wget perl ca-certificates \
@@ -28,9 +32,9 @@ RUN set -eu; \
     curl -fsSL --retry 3 'https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xB1000AC38C41525A19BDC08799AD81DF27A74824' -o /tmp/huawei-key.asc; \
     gpg --batch --import /tmp/huawei-key.asc; \
     gpg --batch --with-colons --fingerprint B1000AC38C41525A19BDC08799AD81DF27A74824 | grep -q '^fpr:::::::::B1000AC38C41525A19BDC08799AD81DF27A74824:'; \
-    base='https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.2.RC1'; \
+    base="https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%20${CANN_VERSION}"; \
     for part in toolkit "kernels-${CANN_CHIP}"; do \
-      name="Ascend-cann-${part}_8.2.RC1_linux-${CANN_ARCH}.run"; \
+      name="Ascend-cann-${part}_${CANN_VERSION}_linux-${CANN_ARCH}.run"; \
       curl -fL --retry 3 -H 'Referer: https://www.hiascend.com/' "${base}/${name}" -o "/tmp/${name}"; \
       curl -fL --retry 3 -H 'Referer: https://www.hiascend.com/' "${base}/${name}.asc" -o "/tmp/${name}.asc"; \
       gpg --batch --status-fd 1 --verify "/tmp/${name}.asc" "/tmp/${name}" | grep -q '^\[GNUPG:\] VALIDSIG B1000AC38C41525A19BDC08799AD81DF27A74824 '; \
@@ -42,7 +46,7 @@ RUN set -eu; \
 
 RUN test -f /usr/local/Ascend/ascend-toolkit/set_env.sh \
     && test -f /usr/local/Ascend/ascend-toolkit/latest/include/acl/acl.h \
-    || { echo 'CANN 8.2.RC1 toolkit environment or ACL headers are missing' >&2; exit 1; }
+    || { echo 'CANN toolkit environment or ACL headers are missing' >&2; exit 1; }
 
 COPY install-openssl3.sh /tmp/install-openssl3.sh
 RUN /bin/sh /tmp/install-openssl3.sh && rm /tmp/install-openssl3.sh

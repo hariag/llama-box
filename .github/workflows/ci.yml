@@ -1218,10 +1218,10 @@ jobs:
             distro_container_image: 'llama-box-ci-cann:8.2.rc1-310p'
           - arch: 'amd64'
             version: '8.1.rc1'
-            distro_container_image: 'gpustack/devel-ascendai-cann:8.1.rc1.beta1-910b-ubuntu20.04-v2'
+            distro_container_image: 'llama-box-ci-cann:8.1.rc1.beta1-910b'
           - arch: 'amd64'
             version: '8.1.rc1'
-            distro_container_image: 'gpustack/devel-ascendai-cann:8.1.rc1.beta1-310p-ubuntu20.04-v2'
+            distro_container_image: 'llama-box-ci-cann:8.1.rc1.beta1-310p'
           - arch: 'arm64'
             version: '8.2.rc1'
             distro_container_image: 'llama-box-ci-cann:8.2.rc1-910b'
@@ -1230,10 +1230,10 @@ jobs:
             distro_container_image: 'llama-box-ci-cann:8.2.rc1-310p'
           - arch: 'arm64'
             version: '8.1.rc1'
-            distro_container_image: 'gpustack/devel-ascendai-cann:8.1.rc1.beta1-910b-ubuntu20.04-v2'
+            distro_container_image: 'llama-box-ci-cann:8.1.rc1.beta1-910b'
           - arch: 'arm64'
             version: '8.1.rc1'
-            distro_container_image: 'gpustack/devel-ascendai-cann:8.1.rc1.beta1-310p-ubuntu20.04-v2'
+            distro_container_image: 'llama-box-ci-cann:8.1.rc1.beta1-310p'
     runs-on: ${{ matrix.arch == 'amd64' && 'ubuntu-22.04' || 'ubuntu-22.04-arm' }}
     steps:
       - name: Maximize Root Space
@@ -1245,12 +1245,12 @@ jobs:
         with:
           fetch-depth: 0
           submodules: 'recursive'
-      - name: Build CANN 8.2 Development Image
-        if: matrix.version == '8.2.rc1'
+      - name: Build CANN Development Image
         run: |
-          docker build -f .github/ci/cann82-ubuntu2004.Dockerfile \
+          docker build -f .github/ci/cann-ubuntu2004.Dockerfile \
             --build-arg CANN_ARCH=${{ matrix.arch == 'amd64' && 'x86_64' || 'aarch64' }} \
             --build-arg CANN_CHIP=${{ contains(matrix.distro_container_image, '310p') && '310p' || '910b' }} \
+            --build-arg CANN_VERSION=${{ matrix.version == '8.1.rc1' && '8.1.RC1' || '8.2.RC1' }} \
             -t ${{ matrix.distro_container_image }} .github/ci
       - name: Setup Cache
         if: false # Disable caching in simple tasks.
