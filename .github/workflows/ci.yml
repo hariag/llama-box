@@ -38,7 +38,7 @@ on:
       - ".github/workflows/sync.yml"
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref && github.ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 
@@ -54,20 +54,25 @@ jobs:
         include:
           - arch: 'amd64'
             instruction: 'avx2'
-    runs-on: ${{ matrix.arch == 'amd64' && 'macos-13' || 'macos-14' }}
+    runs-on: ${{ matrix.arch == 'amd64' && 'macos-15-intel' || 'macos-15' }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.arch == 'amd64' && '13.0' || '14.0' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           submodules: 'recursive'
-      - name: Deps
-        run: |
-          brew update
       - name: Setup XCode
         uses: maxim-lobanov/setup-xcode@v1
         with:
-          xcode-version: '15.2'
+          xcode-version: '16.2'
+      - name: Build static OpenSSL 3
+        run: |
+          export OPENSSL_BUILD_JOBS="$(sysctl -n hw.physicalcpu)"
+          export OPENSSL_INSTALL_PREFIX="${RUNNER_TEMP}/llama-box-openssl3"
+          sh .github/ci/install-openssl3.sh
+          echo "OPENSSL_ROOT_DIR=${OPENSSL_INSTALL_PREFIX}" >> "$GITHUB_ENV"
       - name: Build
         run: |
           echo "===== BUILD ====="
@@ -108,20 +113,25 @@ jobs:
           - '3.0'
     # see https://github.com/actions/runner-images?tab=readme-ov-file#available-images,
     #     https://support.apple.com/en-us/102894.
-    runs-on: ${{ matrix.arch == 'amd64' && 'macos-13' || 'macos-14' }}
+    runs-on: ${{ matrix.arch == 'amd64' && 'macos-15-intel' || 'macos-15' }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.arch == 'amd64' && '13.0' || '14.0' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           submodules: 'recursive'
-      - name: Deps
-        run: |
-          brew update
       - name: Setup XCode
         uses: maxim-lobanov/setup-xcode@v1
         with:
-          xcode-version: ${{ matrix.arch == 'amd64' && '15.2' || '16.2' }}
+          xcode-version: '16.2'
+      - name: Build static OpenSSL 3
+        run: |
+          export OPENSSL_BUILD_JOBS="$(sysctl -n hw.physicalcpu)"
+          export OPENSSL_INSTALL_PREFIX="${RUNNER_TEMP}/llama-box-openssl3"
+          sh .github/ci/install-openssl3.sh
+          echo "OPENSSL_ROOT_DIR=${OPENSSL_INSTALL_PREFIX}" >> "$GITHUB_ENV"
       - name: Build DL
         run: |
           echo "===== BUILD ====="
@@ -165,20 +175,25 @@ jobs:
           - '3.0'
     # see https://github.com/actions/runner-images?tab=readme-ov-file#available-images,
     #     https://support.apple.com/en-us/102894.
-    runs-on: ${{ matrix.arch == 'amd64' && 'macos-13' || 'macos-14' }}
+    runs-on: ${{ matrix.arch == 'amd64' && 'macos-15-intel' || 'macos-15' }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.arch == 'amd64' && '13.0' || '14.0' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           submodules: 'recursive'
-      - name: Deps
-        run: |
-          brew update
       - name: Setup XCode
         uses: maxim-lobanov/setup-xcode@v1
         with:
-          xcode-version: ${{ matrix.arch == 'amd64' && '15.2' || '16.2' }}
+          xcode-version: '16.2'
+      - name: Build static OpenSSL 3
+        run: |
+          export OPENSSL_BUILD_JOBS="$(sysctl -n hw.physicalcpu)"
+          export OPENSSL_INSTALL_PREFIX="${RUNNER_TEMP}/llama-box-openssl3"
+          sh .github/ci/install-openssl3.sh
+          echo "OPENSSL_ROOT_DIR=${OPENSSL_INSTALL_PREFIX}" >> "$GITHUB_ENV"
       - name: Build DL
         run: |
           echo "===== BUILD ====="
@@ -1367,7 +1382,7 @@ jobs:
         include:
           - arch: 'amd64'
             version: '2025.0'
-            distro_container_image: 'gpustack/devel-intel-oneapi:2025.0.0-0-ubuntu22.04-v2'
+            distro_container_image: 'llama-box-ci-oneapi:2025.0.0'
     runs-on: ${{ matrix.arch == 'amd64' && 'ubuntu-22.04' || 'ubuntu-22.04-arm' }}
     steps:
       - name: Maximize Root Space
@@ -1379,6 +1394,8 @@ jobs:
         with:
           fetch-depth: 0
           submodules: 'recursive'
+      - name: Build Development Image
+        run: docker build -f .github/ci/oneapi-ubuntu2204.Dockerfile -t ${{ matrix.distro_container_image }} .github/ci
       - name: Setup Cache
         if: false # Disable caching in simple tasks.
         timeout-minutes: 5
@@ -1396,6 +1413,7 @@ jobs:
           echo "===== SCRIPT ====="
           cat <<EOF > /tmp/entrypoint.sh
           #!/bin/bash
+          source /opt/intel/oneapi/setvars.sh > /dev/null || exit 1
           git config --system --add safe.directory '*'
           echo "===== BUILD ====="
           env || true
@@ -1456,6 +1474,7 @@ jobs:
           echo "===== SCRIPT ====="
           cat <<EOF > /tmp/entrypoint.sh
           #!/bin/bash
+          source /opt/intel/oneapi/setvars.sh > /dev/null || exit 1
           git config --system --add safe.directory '*'
           echo "===== BUILD ====="
           env || true
@@ -1521,7 +1540,7 @@ jobs:
         include:
           - arch: 'amd64'
             version: '1.4'
-            distro_container_image: 'gpustack/devel-lunarg-vulkan:1.4.313-ubuntu22.04-v2'
+            distro_container_image: 'llama-box-ci-vulkan:1.4.313'
     runs-on: ${{ matrix.arch == 'amd64' && 'ubuntu-22.04' || 'ubuntu-22.04-arm' }}
     steps:
       - name: Maximize Root Space
@@ -1533,6 +1552,8 @@ jobs:
         with:
           fetch-depth: 0
           submodules: 'recursive'
+      - name: Build Development Image
+        run: docker build -f .github/ci/vulkan-ubuntu2204.Dockerfile -t ${{ matrix.distro_container_image }} .github/ci
       - name: Setup Cache
         if: false # Disable caching in simple tasks.
         timeout-minutes: 5

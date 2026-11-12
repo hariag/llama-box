@@ -9,7 +9,11 @@ archive="openssl-${version}.tar.gz"
 prefix="${OPENSSL_INSTALL_PREFIX:-/opt/openssl3}"
 cd /tmp
 curl -fL --retry 3 "https://github.com/openssl/openssl/releases/download/openssl-${version}/${archive}" -o "$archive"
-printf '%s  %s\n' "$sha256" "$archive" | sha256sum -c -
+if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s  %s\n' "$sha256" "$archive" | sha256sum -c -
+else
+    printf '%s  %s\n' "$sha256" "$archive" | shasum -a 256 -c -
+fi
 tar -xzf "$archive"
 cd "openssl-${version}"
 ./config --prefix="$prefix" --libdir=lib --openssldir=/etc/ssl no-shared no-tests
