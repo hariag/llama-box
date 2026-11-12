@@ -1,39 +1,45 @@
-# Upstream dependency policy
+# Upstream dependencies
 
-This repository is a thin integration layer around four upstream projects. The
-submodule revisions below were refreshed on 2026-08-25:
+The checked-in submodule gitlinks are the authoritative dependency revisions.
+The llama.cpp submodule is a fork because it also supplies the ggml operations
+used by stable-diffusion.cpp, including INT8 convrot, FP8 E5M2 and SageAttention.
+Do not replace it with an unmodified upstream checkout.
 
-| Dependency | Revision | Update policy |
-| --- | --- | --- |
-| [llama.cpp](https://github.com/ggml-org/llama.cpp) | `eb25b7263e1604b4382295563f5a924002d6f87c` | Track `master`; the current mtmd/common APIs are adapted by `zz_compat.patch`. |
-| [stable-diffusion.cpp](https://github.com/thxcode/stable-diffusion.cpp) | `adbed8f22496342410ef565476fddc156b20e7f7` | Track `dev-dcf91f9e-5`; this is newer than the repository's stale `master` branch and is the branch configured in `.gitmodules`. |
-| [concurrentqueue](https://github.com/cameron314/concurrentqueue) | `683b9e31ea15eb69f1b81cc1defc7850d5f20b71` | Track `master`. |
-| [readerwriterqueue](https://github.com/cameron314/readerwriterqueue) | `131af2c479c6ba36142ee9805e9f60fc4adfa22c` | Track `master`. |
+The November 2026 CUDA update merges ggml-org/llama.cpp at
+`5d4c8eeb24db049acf74bd6f354bed6eaeffc7dc` into the fork. The multimodal
+integration uses `tools/mtmd` from upstream
+`b65bf69213d72a1bb0c9648fad26ac7adf9e73ea`, immediately before the removal
+of the `clip` interfaces used by llama-box. It also carries the small
+llama-box compatibility helpers. Later mtmd changes are not part of this
+update and require migration to the public mtmd API.
 
-## Compatibility layer
+The fork adds ggml operations and uses 160-byte tensor names. Its RPC protocol
+uses a fork-specific major version, and the patch field identifies the tensor
+name size. Clients reject mismatched protocol versions and name sizes. Upgrade
+all llama-box RPC workers and the main server together.
+The pinned stable-diffusion.cpp remains `e29085a5cdf6365dee4cbacddf4d889b104bb498`.
 
-`llama-box/patches/llama.cpp/zz_compat.patch` contains only the integration
-surface that does not belong in the upstream projects:
+Some historical patches in `llama-box/patches` are already applied in the
+fork; an apply warning by itself does not mean a change is missing. Check both
+the fork contents and the relevant build configuration before changing them.
+The build scripts modify submodule worktrees and, unless `BOX_PATCH_DEBUG` is
+enabled, reset them after building. Build from clean, disposable checkouts.
 
-- current mtmd image/audio value types and audio-buffer decoding;
-- compatibility getters for causal attention, model architecture and unknown vocabulary tokens;
-- chat-template capability queries and the legacy template alias helper;
-- the current sampler and chat-template API calls used by llama-box;
-- the deprecated `defrag_thold` command-line compatibility passthrough (accepted and ignored by current upstream);
-- the remaining target/API compatibility shims.
+Before refreshing the fork, check ggml operation numbers, RPC compatibility,
+model and mtmd APIs, and stable-diffusion.cpp's use of the shared ggml backend.
+Validate CPU and CUDA builds, model inference, speculative decoding, images,
+audio, and the backends changed by the update. Record the tested GPU, driver,
+CUDA toolkit, model, and runtime settings with the results.
 
-The old patch set was written against an earlier llama.cpp layout. Patches that
-no longer apply were removed instead of leaving build-time warnings and false
-confidence. The remaining patches are applied by `llama-box/scripts/build-patch.cmake`
-from a clean submodule checkout and are cleaned after the build.
+For a standalone llama.cpp build with shared ggml libraries, the fork-specific
+GPU checks can be run against the same backend libraries as follows (select the
+intended GPU with `CUDA_VISIBLE_DEVICES`):
 
-## Refresh procedure
-
-1. Update each submodule to a reviewed upstream revision.
-2. Run the CPU configure/build and verify that every required patch applies.
-3. Port only the integration breakages into `zz_compat.patch` or the llama-box sources.
-4. Run `git diff --check`, `build/bin/llama-box --help`, and the available API tests.
-
-The stable-diffusion branch should not be changed to `master` automatically:
-the current pinned development branch is the newer functional revision for this
-integration.
+```sh
+c++ -std=c++17 -Illama.cpp/ggml/include tests/test_ggml_custom_ops.cpp \
+  -L"$BUILD/bin" -Wl,-rpath,"$BUILD/bin" -lggml -lggml-base -o /tmp/test-ggml-custom
+/tmp/test-ggml-custom CUDA0
+c++ -std=c++17 -Illama.cpp/ggml/include tests/test_ggml_sage_attention.cpp \
+  -L"$BUILD/bin" -Wl,-rpath,"$BUILD/bin" -lggml -lggml-base -o /tmp/test-ggml-sage
+/tmp/test-ggml-sage
+```

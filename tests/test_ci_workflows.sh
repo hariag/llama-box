@@ -13,7 +13,9 @@ done <<<"$openssl_lines"
 
 cann_patch="$repo_root/llama-box/patches/ggml/cann-compat.patch"
 test -f "$cann_patch"
-git -C "$repo_root/llama.cpp/ggml" apply --check "$cann_patch"
+if rg -q '^#include <aclnnop/aclnn_recurrent_gated_delta_rule.h>$' "$repo_root/llama.cpp/ggml/src/ggml-cann/aclnn_ops.cpp"; then
+    git -C "$repo_root/llama.cpp/ggml" apply --check "$cann_patch"
+fi
 
 for provider in GitCode Gitee; do
     rg -q "name: Check ${provider} credentials" "$sync_workflow"

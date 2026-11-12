@@ -416,11 +416,12 @@ static inline std::vector<llama_multimodal_tokens> tokenize_audio(clip_ctx * ctx
                                                                   const std::vector<float> & samples) {
     auto preprocessor = make_audio_preprocessor(ctx_clip);
     preprocessor->initialize();
-    std::vector<mtmd_audio_mel> entries;
-    if (!preprocessor->preprocess(samples.data(), samples.size(), entries)) {
+    auto audio = preprocessor->preprocess(samples.data(), samples.size());
+    if (!preprocessor->compute(audio)) {
         LOG_ERR("%s", "unable to preprocess audio\n");
         return {};
     }
+    auto & entries = audio.entries;
     if (entries.empty()) {
         LOG_ERR("%s", "no audio chunks after preprocessing\n");
         return {};
@@ -433,15 +434,13 @@ static inline std::vector<llama_multimodal_tokens> tokenize_audio(clip_ctx * ctx
 
     const size_t n_entries = entries.size();
     for (size_t i = 0; i < n_entries; i++) {
-        clip_image_f32 mel_f32;
-        mel_f32.set_size({static_cast<int>(entries[i].n_len), static_cast<int>(entries[i].n_mel)},
-                         entries[i].data.empty(), true);
-        mel_f32.cpy_buf(entries[i].data);
+        clip_image_f32 mel_f32 = std::move(entries[i]);
+        const auto mel_size = mel_f32.get_size();
         // init
         result[i].n_tokens  = clip_n_output_tokens(ctx_clip, &mel_f32);
         result[i].n_pos     = result[i].n_tokens;
         result[i].is_audio  = true;
-        result[i].size      = clip_image_size{ entries[i].n_len, entries[i].n_mel };
+        result[i].size      = mel_size;
         result[i].grid_size = clip_image_size{ 1, 1 };
         result[i].embed.resize(result[i].n_tokens * n_mmproj_embd);
         // encode
