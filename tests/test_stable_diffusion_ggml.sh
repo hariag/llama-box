@@ -5,7 +5,11 @@ repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 patch_file="$repo_root/llama-box/patches/ggml/stable-diffusion-int8-convrot.patch"
 
 test -f "$patch_file"
-git -C "$repo_root/llama.cpp" apply --check "$patch_file"
+if ! git -C "$repo_root/llama.cpp" apply --check "$patch_file" 2>/dev/null; then
+    rg -q 'GGML_OP_QUANTIZE_I8_CONVROT' "$repo_root/llama.cpp/ggml/include/ggml.h"
+    rg -q 'ggml_mul_mat_i8_tensorwise\(' "$repo_root/llama.cpp/ggml/src/ggml.c"
+    rg -q 'ggml_quantize_i8_convrot\(' "$repo_root/llama.cpp/ggml/src/ggml.c"
+fi
 rg -q '^diff --git a/ggml/include/ggml.h b/ggml/include/ggml.h$' "$patch_file"
 rg -q '^diff --git a/ggml/src/ggml.c b/ggml/src/ggml.c$' "$patch_file"
 rg -q 'GGML_OP_QUANTIZE_I8_CONVROT' "$patch_file"

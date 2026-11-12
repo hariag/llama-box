@@ -38,7 +38,7 @@ on:
       - ".github/workflows/sync.yml"
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref && github.ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 
@@ -54,20 +54,25 @@ jobs:
         include:
           - arch: 'amd64'
             instruction: 'avx2'
-    runs-on: ${{ matrix.arch == 'amd64' && 'macos-13' || 'macos-14' }}
+    runs-on: ${{ matrix.arch == 'amd64' && 'macos-15-intel' || 'macos-15' }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.arch == 'amd64' && '13.0' || '14.0' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           submodules: 'recursive'
-      - name: Deps
-        run: |
-          brew update
       - name: Setup XCode
         uses: maxim-lobanov/setup-xcode@v1
         with:
-          xcode-version: '15.2'
+          xcode-version: '16.2'
+      - name: Build static OpenSSL 3
+        run: |
+          export OPENSSL_BUILD_JOBS="$(sysctl -n hw.physicalcpu)"
+          export OPENSSL_INSTALL_PREFIX="${RUNNER_TEMP}/llama-box-openssl3"
+          sh .github/ci/install-openssl3.sh
+          echo "OPENSSL_ROOT_DIR=${OPENSSL_INSTALL_PREFIX}" >> "$GITHUB_ENV"
       - name: Build
         run: |
           echo "===== BUILD ====="
@@ -108,20 +113,25 @@ jobs:
           - '3.0'
     # see https://github.com/actions/runner-images?tab=readme-ov-file#available-images,
     #     https://support.apple.com/en-us/102894.
-    runs-on: ${{ matrix.arch == 'amd64' && 'macos-13' || 'macos-14' }}
+    runs-on: ${{ matrix.arch == 'amd64' && 'macos-15-intel' || 'macos-15' }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.arch == 'amd64' && '13.0' || '14.0' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           submodules: 'recursive'
-      - name: Deps
-        run: |
-          brew update
       - name: Setup XCode
         uses: maxim-lobanov/setup-xcode@v1
         with:
-          xcode-version: ${{ matrix.arch == 'amd64' && '15.2' || '16.2' }}
+          xcode-version: '16.2'
+      - name: Build static OpenSSL 3
+        run: |
+          export OPENSSL_BUILD_JOBS="$(sysctl -n hw.physicalcpu)"
+          export OPENSSL_INSTALL_PREFIX="${RUNNER_TEMP}/llama-box-openssl3"
+          sh .github/ci/install-openssl3.sh
+          echo "OPENSSL_ROOT_DIR=${OPENSSL_INSTALL_PREFIX}" >> "$GITHUB_ENV"
       - name: Build DL
         run: |
           echo "===== BUILD ====="
@@ -165,20 +175,25 @@ jobs:
           - '3.0'
     # see https://github.com/actions/runner-images?tab=readme-ov-file#available-images,
     #     https://support.apple.com/en-us/102894.
-    runs-on: ${{ matrix.arch == 'amd64' && 'macos-13' || 'macos-14' }}
+    runs-on: ${{ matrix.arch == 'amd64' && 'macos-15-intel' || 'macos-15' }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.arch == 'amd64' && '13.0' || '14.0' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           submodules: 'recursive'
-      - name: Deps
-        run: |
-          brew update
       - name: Setup XCode
         uses: maxim-lobanov/setup-xcode@v1
         with:
-          xcode-version: ${{ matrix.arch == 'amd64' && '15.2' || '16.2' }}
+          xcode-version: '16.2'
+      - name: Build static OpenSSL 3
+        run: |
+          export OPENSSL_BUILD_JOBS="$(sysctl -n hw.physicalcpu)"
+          export OPENSSL_INSTALL_PREFIX="${RUNNER_TEMP}/llama-box-openssl3"
+          sh .github/ci/install-openssl3.sh
+          echo "OPENSSL_ROOT_DIR=${OPENSSL_INSTALL_PREFIX}" >> "$GITHUB_ENV"
       - name: Build DL
         run: |
           echo "===== BUILD ====="
@@ -244,13 +259,13 @@ jobs:
         include:
           - arch: 'amd64'
             instruction: 'avx2'
-            distro_container_image: 'gpustack/devel-cpu:centos7-v2'
+            distro_container_image: 'llama-box-ci/cpu-centos7:local'
           - arch: 'amd64'
             instruction: 'avx512'
-            distro_container_image: 'gpustack/devel-cpu:rockylinux8.9-v2'
+            distro_container_image: 'llama-box-ci/cpu-rockylinux8:local'
           - arch: 'arm64'
             instruction: 'neon'
-            distro_container_image: 'gpustack/devel-cpu:ubuntu18.04-v2'
+            distro_container_image: 'llama-box-ci/cpu-ubuntu1804:local'
     runs-on: ${{ matrix.arch == 'amd64' && 'ubuntu-22.04' || 'ubuntu-22.04-arm' }}
     steps:
       - name: Maximize Root Space
@@ -289,6 +304,7 @@ jobs:
           env || true
           cmake -S ${{ github.workspace }} -B ${{ github.workspace }}/build -DCMAKE_BUILD_TYPE=Release \
             -DBOX_PATCH_CI=on \
+            -DCMAKE_EXE_LINKER_FLAGS='-static-libgcc -static-libstdc++' \
             -DGGML_NATIVE=off \
             ${{ matrix.instruction == 'avx2' && '-DGGML_AVX=on -DGGML_AVX_VNNI=off -DGGML_AVX2=on' || '' }} \
             ${{ matrix.instruction == 'avx512' && '-DGGML_AVX512=on -DGGML_AVX512_BF16=off -DGGML_AVX512_VBMI=on -DGGML_AVX512_VNNI=on' || '' }} \
@@ -318,6 +334,18 @@ jobs:
           EOF
           chmod +x /tmp/entrypoint.sh
           cat /tmp/entrypoint.sh
+          # The historical GPUStack development image is no longer public.
+          # Build from Rocky 8 to retain the artifact's glibc compatibility.
+          if [ "${{ matrix.distro_container_image }}" = "llama-box-ci/cpu-rockylinux8:local" ]; then
+            docker build -f .github/ci/cpu-rockylinux8.Dockerfile \
+              -t llama-box-ci/cpu-rockylinux8:local .github/ci
+          elif [ "${{ matrix.distro_container_image }}" = "llama-box-ci/cpu-centos7:local" ]; then
+            docker build -f .github/ci/cpu-centos7.Dockerfile \
+              -t llama-box-ci/cpu-centos7:local .github/ci
+          elif [ "${{ matrix.distro_container_image }}" = "llama-box-ci/cpu-ubuntu1804:local" ]; then
+            docker build -f .github/ci/cpu-ubuntu1804.Dockerfile \
+              -t llama-box-ci/cpu-ubuntu1804:local .github/ci
+          fi
 
           docker run \
             --rm \
@@ -348,9 +376,9 @@ jobs:
       matrix:
         include:
           - arch: 'amd64'
-            distro_container_image: 'gpustack/devel-cpu:rockylinux8.9-v2'
+            distro_container_image: 'llama-box-ci/cpu-rockylinux8:local'
           - arch: 'arm64'
-            distro_container_image: 'gpustack/devel-cpu:rockylinux8.9-v2'
+            distro_container_image: 'llama-box-ci/cpu-rockylinux8:local'
     runs-on: ${{ matrix.arch == 'amd64' && 'ubuntu-22.04' || 'ubuntu-22.04-arm' }}
     steps:
       - name: Maximize Root Space
@@ -418,6 +446,12 @@ jobs:
 
           chmod +x /tmp/entrypoint.sh
           cat /tmp/entrypoint.sh
+          # The historical GPUStack development image is no longer public.
+          # Build from Rocky 8 to retain the artifact's glibc compatibility.
+          if [ "${{ matrix.distro_container_image }}" = "llama-box-ci/cpu-rockylinux8:local" ]; then
+            docker build -f .github/ci/cpu-rockylinux8.Dockerfile \
+              -t llama-box-ci/cpu-rockylinux8:local .github/ci
+          fi
 
           docker run \
             --rm \
@@ -454,12 +488,12 @@ jobs:
         include:
           - arch: 'amd64'
             version: '12.8'
-            distro_container_image: 'gpustack/devel-nvidia-cuda:12.8.0-rockylinux8-v2'
+            distro_container_image: 'llama-box-ci/cuda-rockylinux8:12.8'
             cuda_arch: '60-real;61-real;70-real;75-real;80-real;86-real;87-real;89-real;90-real;100-real;101-real;120-real'
             install_build_deps: '0'
           - arch: 'amd64'
             version: '12.4'
-            distro_container_image: 'gpustack/devel-nvidia-cuda:12.4.0-centos7-v2'
+            distro_container_image: 'llama-box-ci/cuda-centos7:12.4'
             cuda_arch: '60-real;61-real;70-real;75-real;80-real;86-real;87-real;89-real;90-real'
             install_build_deps: '0'
           - arch: 'amd64'
@@ -478,12 +512,12 @@ jobs:
             install_build_deps: '1'
           - arch: 'arm64'
             version: '12.8'
-            distro_container_image: 'gpustack/devel-nvidia-cuda:12.8.0-rockylinux8-v2'
+            distro_container_image: 'llama-box-ci/cuda-rockylinux8:12.8'
             cuda_arch: '60-real;61-real;70-real;75-real;80-real;86-real;87-real;89-real;90-real;100-real;101-real;120-real'
             install_build_deps: '0'
           - arch: 'arm64'
             version: '12.4'
-            distro_container_image: 'gpustack/devel-nvidia-cuda:12.4.0-rockylinux8-v2'
+            distro_container_image: 'llama-box-ci/cuda-rockylinux8:12.4'
             cuda_arch: '60-real;61-real;70-real;75-real;80-real;86-real;87-real;89-real;90-real'
             install_build_deps: '0'
     runs-on: ${{ matrix.arch == 'amd64' && 'ubuntu-22.04' || 'ubuntu-22.04-arm' }}
@@ -505,6 +539,17 @@ jobs:
           path: |
             ${{ github.workspace }}/.ccache
             ${{ github.workspace }}/.sccache
+      - name: Build Rocky Linux 8 CUDA development image
+        if: matrix.distro_container_image == 'llama-box-ci/cuda-rockylinux8:12.8' || matrix.distro_container_image == 'llama-box-ci/cuda-rockylinux8:12.4'
+        run: |
+          docker build -f .github/ci/cuda-rockylinux8.Dockerfile \
+            --build-arg CUDA_VERSION=${{ matrix.version }}.0 \
+            -t ${{ matrix.distro_container_image }} .github/ci
+      - name: Build CentOS 7 CUDA development image
+        if: matrix.distro_container_image == 'llama-box-ci/cuda-centos7:12.4'
+        run: |
+          docker build -f .github/ci/cuda-centos7.Dockerfile \
+            -t llama-box-ci/cuda-centos7:12.4 .github/ci
       - name: Build DL
         env:
           CCACHE_DIR: "${{ github.workspace }}/.ccache"
@@ -662,7 +707,7 @@ jobs:
         include:
           - arch: 'amd64'
             version: 'rc4.2'
-            distro_container_image: 'gpustack/devel-mthreads-musa:rc4.2.0-ubuntu22.04-v2'
+            distro_container_image: 'llama-box-ci-musa:rc4.2'
             musa_arch: '21;22;31'
     runs-on: ${{ matrix.arch == 'amd64' && 'ubuntu-22.04' || 'ubuntu-22.04-arm' }}
     steps:
@@ -675,6 +720,8 @@ jobs:
         with:
           fetch-depth: 0
           submodules: 'recursive'
+      - name: Build Development Image
+        run: docker build -f .github/ci/musa-ubuntu2204.Dockerfile -t ${{ matrix.distro_container_image }} .github/ci
       - name: Setup Cache
         timeout-minutes: 5
         uses: actions/cache@v4
@@ -823,7 +870,7 @@ jobs:
         include:
           - arch: 'amd64'
             version: '6.2'
-            distro_container_image: 'gpustack/devel-rocm-hip:6.2.4-centos7-v2'
+            distro_container_image: 'llama-box-ci-rocm:6.2.4'
             hip_arch: 'gfx906:xnack-;gfx908:xnack-;gfx90a:xnack+;gfx90a:xnack-;gfx942;gfx1030;gfx1031;gfx1032;gfx1100;gfx1101;gfx1102'
     runs-on: ${{ matrix.arch == 'amd64' && 'ubuntu-22.04' || 'ubuntu-22.04-arm' }}
     steps:
@@ -836,6 +883,8 @@ jobs:
         with:
           fetch-depth: 0
           submodules: 'recursive'
+      - name: Build Development Image
+        run: docker build -f .github/ci/rocm-centos7.Dockerfile -t ${{ matrix.distro_container_image }} .github/ci
       - name: Setup Cache
         timeout-minutes: 5
         uses: actions/cache@v4
@@ -990,7 +1039,7 @@ jobs:
         include:
           - arch: 'amd64'
             version: '25.04'
-            distro_container_image: 'gpustack/devel-hygon-dtk:25.04-ubuntu22.04-v2'
+            distro_container_image: 'llama-box-ci-dtk:25.04'
             hip_arch: 'gfx906;gfx926;gfx928;gfx936'
     runs-on: ${{ matrix.arch == 'amd64' && 'ubuntu-22.04' || 'ubuntu-22.04-arm' }}
     steps:
@@ -1003,6 +1052,8 @@ jobs:
         with:
           fetch-depth: 0
           submodules: 'recursive'
+      - name: Build Development Image
+        run: docker build -f .github/ci/dtk-ubuntu2204.Dockerfile -t ${{ matrix.distro_container_image }} .github/ci
       - name: Setup Cache
         timeout-minutes: 5
         uses: actions/cache@v4
@@ -1161,28 +1212,28 @@ jobs:
         include:
           - arch: 'amd64'
             version: '8.2.rc1'
-            distro_container_image: 'gpustack/devel-ascendai-cann:8.2.rc1-910b-ubuntu20.04-v2'
+            distro_container_image: 'llama-box-ci-cann:8.2.rc1-910b'
           - arch: 'amd64'
             version: '8.2.rc1'
-            distro_container_image: 'gpustack/devel-ascendai-cann:8.2.rc1-310p-ubuntu20.04-v2'
+            distro_container_image: 'llama-box-ci-cann:8.2.rc1-310p'
           - arch: 'amd64'
             version: '8.1.rc1'
-            distro_container_image: 'gpustack/devel-ascendai-cann:8.1.rc1.beta1-910b-ubuntu20.04-v2'
+            distro_container_image: 'llama-box-ci-cann:8.1.rc1.beta1-910b'
           - arch: 'amd64'
             version: '8.1.rc1'
-            distro_container_image: 'gpustack/devel-ascendai-cann:8.1.rc1.beta1-310p-ubuntu20.04-v2'
+            distro_container_image: 'llama-box-ci-cann:8.1.rc1.beta1-310p'
           - arch: 'arm64'
             version: '8.2.rc1'
-            distro_container_image: 'gpustack/devel-ascendai-cann:8.2.rc1-910b-ubuntu20.04-v2'
+            distro_container_image: 'llama-box-ci-cann:8.2.rc1-910b'
           - arch: 'arm64'
             version: '8.2.rc1'
-            distro_container_image: 'gpustack/devel-ascendai-cann:8.2.rc1-310p-ubuntu20.04-v2'
+            distro_container_image: 'llama-box-ci-cann:8.2.rc1-310p'
           - arch: 'arm64'
             version: '8.1.rc1'
-            distro_container_image: 'gpustack/devel-ascendai-cann:8.1.rc1.beta1-910b-ubuntu20.04-v2'
+            distro_container_image: 'llama-box-ci-cann:8.1.rc1.beta1-910b'
           - arch: 'arm64'
             version: '8.1.rc1'
-            distro_container_image: 'gpustack/devel-ascendai-cann:8.1.rc1.beta1-310p-ubuntu20.04-v2'
+            distro_container_image: 'llama-box-ci-cann:8.1.rc1.beta1-310p'
     runs-on: ${{ matrix.arch == 'amd64' && 'ubuntu-22.04' || 'ubuntu-22.04-arm' }}
     steps:
       - name: Maximize Root Space
@@ -1194,6 +1245,13 @@ jobs:
         with:
           fetch-depth: 0
           submodules: 'recursive'
+      - name: Build CANN Development Image
+        run: |
+          docker build -f .github/ci/cann-ubuntu2004.Dockerfile \
+            --build-arg CANN_ARCH=${{ matrix.arch == 'amd64' && 'x86_64' || 'aarch64' }} \
+            --build-arg CANN_CHIP=${{ contains(matrix.distro_container_image, '310p') && '310p' || '910b' }} \
+            --build-arg CANN_VERSION=${{ matrix.version == '8.1.rc1' && '8.1.RC1' || '8.2.RC1' }} \
+            -t ${{ matrix.distro_container_image }} .github/ci
       - name: Setup Cache
         if: false # Disable caching in simple tasks.
         timeout-minutes: 5
@@ -1339,7 +1397,7 @@ jobs:
         include:
           - arch: 'amd64'
             version: '2025.0'
-            distro_container_image: 'gpustack/devel-intel-oneapi:2025.0.0-0-ubuntu22.04-v2'
+            distro_container_image: 'llama-box-ci-oneapi:2025.0.0'
     runs-on: ${{ matrix.arch == 'amd64' && 'ubuntu-22.04' || 'ubuntu-22.04-arm' }}
     steps:
       - name: Maximize Root Space
@@ -1351,6 +1409,8 @@ jobs:
         with:
           fetch-depth: 0
           submodules: 'recursive'
+      - name: Build Development Image
+        run: docker build -f .github/ci/oneapi-ubuntu2204.Dockerfile -t ${{ matrix.distro_container_image }} .github/ci
       - name: Setup Cache
         if: false # Disable caching in simple tasks.
         timeout-minutes: 5
@@ -1368,6 +1428,7 @@ jobs:
           echo "===== SCRIPT ====="
           cat <<EOF > /tmp/entrypoint.sh
           #!/bin/bash
+          source /opt/intel/oneapi/setvars.sh > /dev/null || exit 1
           git config --system --add safe.directory '*'
           echo "===== BUILD ====="
           env || true
@@ -1428,6 +1489,7 @@ jobs:
           echo "===== SCRIPT ====="
           cat <<EOF > /tmp/entrypoint.sh
           #!/bin/bash
+          source /opt/intel/oneapi/setvars.sh > /dev/null || exit 1
           git config --system --add safe.directory '*'
           echo "===== BUILD ====="
           env || true
@@ -1493,7 +1555,7 @@ jobs:
         include:
           - arch: 'amd64'
             version: '1.4'
-            distro_container_image: 'gpustack/devel-lunarg-vulkan:1.4.313-ubuntu22.04-v2'
+            distro_container_image: 'llama-box-ci-vulkan:1.4.313'
     runs-on: ${{ matrix.arch == 'amd64' && 'ubuntu-22.04' || 'ubuntu-22.04-arm' }}
     steps:
       - name: Maximize Root Space
@@ -1505,6 +1567,8 @@ jobs:
         with:
           fetch-depth: 0
           submodules: 'recursive'
+      - name: Build Development Image
+        run: docker build -f .github/ci/vulkan-ubuntu2204.Dockerfile -t ${{ matrix.distro_container_image }} .github/ci
       - name: Setup Cache
         if: false # Disable caching in simple tasks.
         timeout-minutes: 5
@@ -1670,7 +1734,13 @@ jobs:
           $ProgressPreference = 'SilentlyContinue'
 
           choco install sccache ninja curl -y
-          choco install openssl --version 4.0.1 -y
+          # The Windows runner already includes the full OpenSSL development SDK.
+          # Avoid the version-pinned Chocolatey installer, whose upstream URL expires.
+          if (-not (Test-Path "C:\Program Files\OpenSSL\include\openssl\ssl.h")) {
+            throw "The runner OpenSSL development headers are missing"
+          }
+          & "C:\Program Files\OpenSSL\bin\openssl.exe" version
+          if ($LASTEXITCODE -ne 0) { throw "The runner OpenSSL installation is unusable" }
       - name: Setup
         run: |
           $ErrorActionPreference = "Stop"
@@ -1754,7 +1824,13 @@ jobs:
           $ProgressPreference = 'SilentlyContinue'
 
           choco install sccache ninja curl -y
-          choco install openssl --version 4.0.1 -y
+          # The Windows runner already includes the full OpenSSL development SDK.
+          # Avoid the version-pinned Chocolatey installer, whose upstream URL expires.
+          if (-not (Test-Path "C:\Program Files\OpenSSL\include\openssl\ssl.h")) {
+            throw "The runner OpenSSL development headers are missing"
+          }
+          & "C:\Program Files\OpenSSL\bin\openssl.exe" version
+          if ($LASTEXITCODE -ne 0) { throw "The runner OpenSSL installation is unusable" }
       - name: Setup
         run: |
           $ErrorActionPreference = "Stop"
@@ -1845,7 +1921,13 @@ jobs:
           $ProgressPreference = 'SilentlyContinue'
 
           choco install sccache ninja curl -y
-          choco install openssl --version 4.0.1 -y
+          # The Windows runner already includes the full OpenSSL development SDK.
+          # Avoid the version-pinned Chocolatey installer, whose upstream URL expires.
+          if (-not (Test-Path "C:\Program Files\OpenSSL\include\openssl\ssl.h")) {
+            throw "The runner OpenSSL development headers are missing"
+          }
+          & "C:\Program Files\OpenSSL\bin\openssl.exe" version
+          if ($LASTEXITCODE -ne 0) { throw "The runner OpenSSL installation is unusable" }
       - name: Setup CUDA
         run: |
           $ErrorActionPreference = "Stop"
@@ -1996,7 +2078,13 @@ jobs:
           $ProgressPreference = 'SilentlyContinue'
 
           choco install sccache ninja curl -y
-          choco install openssl --version 4.0.1 -y
+          # The Windows runner already includes the full OpenSSL development SDK.
+          # Avoid the version-pinned Chocolatey installer, whose upstream URL expires.
+          if (-not (Test-Path "C:\Program Files\OpenSSL\include\openssl\ssl.h")) {
+            throw "The runner OpenSSL development headers are missing"
+          }
+          & "C:\Program Files\OpenSSL\bin\openssl.exe" version
+          if ($LASTEXITCODE -ne 0) { throw "The runner OpenSSL installation is unusable" }
       - name: Setup HIP
         run: |
           $ErrorActionPreference = "Stop"
@@ -2146,7 +2234,13 @@ jobs:
           $ProgressPreference = 'SilentlyContinue'
 
           choco install sccache ninja curl -y
-          choco install openssl --version 4.0.1 -y
+          # The Windows runner already includes the full OpenSSL development SDK.
+          # Avoid the version-pinned Chocolatey installer, whose upstream URL expires.
+          if (-not (Test-Path "C:\Program Files\OpenSSL\include\openssl\ssl.h")) {
+            throw "The runner OpenSSL development headers are missing"
+          }
+          & "C:\Program Files\OpenSSL\bin\openssl.exe" version
+          if ($LASTEXITCODE -ne 0) { throw "The runner OpenSSL installation is unusable" }
       - name: Setup oneAPI
         run: |
           $ErrorActionPreference = "Stop"
@@ -2287,7 +2381,13 @@ jobs:
           $ProgressPreference = 'SilentlyContinue'
 
           choco install sccache ninja curl -y
-          choco install openssl --version 4.0.1 -y
+          # The Windows runner already includes the full OpenSSL development SDK.
+          # Avoid the version-pinned Chocolatey installer, whose upstream URL expires.
+          if (-not (Test-Path "C:\Program Files\OpenSSL\include\openssl\ssl.h")) {
+            throw "The runner OpenSSL development headers are missing"
+          }
+          & "C:\Program Files\OpenSSL\bin\openssl.exe" version
+          if ($LASTEXITCODE -ne 0) { throw "The runner OpenSSL installation is unusable" }
       - name: Setup Vulkan
         run: |
           $ErrorActionPreference = "Stop"

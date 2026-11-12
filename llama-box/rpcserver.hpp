@@ -525,10 +525,12 @@ struct rpcserver {
 
         if (params.use_cache) {
             if (params.cache_dir.empty()) {
-                params.cache_dir = fs_get_cache_directory() + +"rpc/";
+                params.cache_dir = (fs_get_cache_directory() / "rpc").string();
             }
             cache_dir = params.cache_dir.c_str();
-            if (!fs_create_directory_with_parents(params.cache_dir)) {
+            std::error_code ec;
+            common_create_directories(std::filesystem::u8path(params.cache_dir), ec);
+            if (ec) {
                 SRV_ERR("failed to create cache directory: %s\n", cache_dir);
                 return false;
             }
