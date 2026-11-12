@@ -3045,7 +3045,12 @@ struct httpserver {
         }
 
         // prompt cache
-        cache_prompt = params.cache_prompt && llm_kv_cache_shift && llama_get_memory(llm_ctx) != nullptr;
+        // Hybrid checkpoints reuse stable prefix positions without shifting KV cells.
+        hybrid_prompt_cache = !llm_kv_cache_shift && llm_model_arch_name == "qwen35" &&
+                              llm_model_n_swa == 0 && !params.llm_params.embedding &&
+                              (!llm_ctx_draft || mtp_enabled);
+        cache_prompt = params.cache_prompt && (llm_kv_cache_shift || hybrid_prompt_cache) &&
+                       llama_get_memory(llm_ctx) != nullptr;
         if (cache_prompt) {
             cache_prompts.resize(params.llm_params.n_threads_http);
         }
@@ -3507,8 +3512,20 @@ struct httpserver {
         bool         used        = false;
         llama_pos    pos         = 0;  // position
         llama_pos    pos_discard = 0;  // count the discard position
+        llama_tokens checkpoint_tokens;
+        std::vector<uint8_t> checkpoint_tgt, checkpoint_dft, checkpoint_spec;
+        llama_pos checkpoint_pos = 0;
+        void invalidate_checkpoint() {
+            checkpoint_tokens.clear();
+            std::vector<uint8_t>().swap(checkpoint_tgt);
+            std::vector<uint8_t>().swap(checkpoint_dft);
+            std::vector<uint8_t>().swap(checkpoint_spec);
+            checkpoint_pos = 0;
+        }
     };
 
+    bool                            hybrid_prompt_cache = false;
+    bool                            hybrid_cache_unhealthy = false;
     bool                            cache_prompt  = false;
     bool                            shift_context = false;
     common_chat_templates_ptr       chat_templates;
@@ -3699,8 +3716,32 @@ struct httpserver {
 
     inline bool support_image() const { return sd_ctx != nullptr; }
 
+    inline bool clear_completion_sequence(int32_t seq_id) {
+        const bool tgt_ok = llama_memory_seq_rm(llama_get_memory(llm_ctx), seq_id, 0, -1);
+        const bool dft_ok = !llm_ctx_draft || llama_memory_seq_rm(llama_get_memory(llm_ctx_draft), seq_id, 0, -1);
+        if (hybrid_prompt_cache && !(tgt_ok && dft_ok)) {
+            hybrid_cache_unhealthy = true;
+            SRV_ERR("failed to clear hybrid sequence %d; refusing further completions\n", seq_id);
+        }
+        return tgt_ok && dft_ok;
+    }
+
     inline void shift_completion_task_cache(completions_task * task) {
         if (!llm_kv_cache_shift) {
+            // A hybrid prefix cannot be shifted, but an idle slot can be evicted
+            // completely to make room for another request.
+            if (hybrid_prompt_cache && cache_prompt) {
+                for (int32_t i = 0; i < params.llm_params.n_threads_http; ++i) {
+                    auto & entry = cache_prompts.at(i);
+                    if (entry.used || entry.pos == 0) continue;
+                    if (!clear_completion_sequence(i)) return;
+                    llm_kv_cache_used -= entry.pos;
+                    llm_kv_cache_inactive -= entry.pos;
+                    entry.tokens.clear(); entry.invalidate_checkpoint();
+                    entry.pos = entry.pos_discard = 0;
+                    break;
+                }
+            }
             return;
         }
 
@@ -3792,12 +3833,34 @@ struct httpserver {
         // -1 no tokens / failed to allocate batch,
         //  0 ok,
         //  1 failed to prepare.
+        if (hybrid_cache_unhealthy) return -2;
         int32_t                decoded       = 0;
         bool                   is_mrope_view = llm_model_rope_mrope && input_batch.n_tokens > batch_view_max;
         std::vector<llama_pos> mrope_pos_view;
 
-        for (int32_t i_batch_view = 0; i_batch_view < input_batch.n_tokens; i_batch_view += batch_view_max) {
-            const int32_t n_batch_view = std::min(batch_view_max, input_batch.n_tokens - i_batch_view);
+        for (int32_t i_batch_view = 0; i_batch_view < input_batch.n_tokens;) {
+            int32_t n_batch_view = std::min(batch_view_max, input_batch.n_tokens - i_batch_view);
+            completions_task * checkpoint_task = nullptr;
+            // Stop immediately after prompt token N-2: token N-1 must be evaluated
+            // again for logits when the identical prompt is reused.
+            if (hybrid_prompt_cache && cache_prompt && input_ctx == llm_ctx && input_batch.token) {
+                for (const auto & ptr : batch_task_ptrs) {
+                    auto * task = dynamic_cast<completions_task *>(ptr.get());
+                    if (!task || task->n_decoded || task->n_prefilling_request < 2 ||
+                        task->tokenized_prompts_include_multimedias || !task->get_lora_adapters().empty()) continue;
+                    auto & entry = cache_prompts.at(task->get_seq_id());
+                    if (entry.checkpoint_pos != 0) continue;
+                    for (int32_t j = 0; j < n_batch_view; ++j) {
+                        int32_t k = i_batch_view + j;
+                        if (input_batch.n_seq_id[k] == 1 && input_batch.seq_id[k][0] == task->get_seq_id() &&
+                            input_batch.pos[k] == task->n_prefilling_request - 2) {
+                            n_batch_view = j + 1;
+                            checkpoint_task = task;
+                            break;
+                        }
+                    }
+                }
+            }
             llama_batch   input_batch_view;
             if (input_batch.embd == nullptr) {
                 input_batch_view = {
@@ -3860,7 +3923,8 @@ struct httpserver {
                 else {
                     shift_completion_task_cache(nullptr);
                 }
-                // decode again
+                // decode again only while all hybrid sequence states are healthy
+                if (hybrid_cache_unhealthy) { decoded = -2; break; }
                 decoded = llama_decode(input_ctx, input_batch_view);
             }
             if (decoded == 0 && spec != nullptr && input_ctx == llm_ctx && input_batch_view.token != nullptr) {
@@ -3879,6 +3943,46 @@ struct httpserver {
             if (decoded != 0) {
                 break;
             }
+            if (input_ctx == llm_ctx && input_batch.token) {
+                for (const auto & ptr : batch_task_ptrs) {
+                    auto * task = dynamic_cast<completions_task *>(ptr.get());
+                    if (!task || task->n_decoded) continue;
+                    for (int32_t j = 0; j < n_batch_view; ++j) {
+                        const int32_t k = i_batch_view + j;
+                        if (input_batch.n_seq_id[k] == 1 && input_batch.seq_id[k][0] == task->get_seq_id() &&
+                            input_batch.pos[k] == task->n_prefilling_request - 1) task->i_batch_seq_end = j;
+                    }
+                }
+            }
+            if (checkpoint_task) {
+                auto & entry = cache_prompts.at(checkpoint_task->get_seq_id());
+                const auto flags = LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY;
+                const auto seq = checkpoint_task->get_seq_id();
+                const size_t target_size = llama_state_seq_get_size_ext(llm_ctx, seq, flags);
+                const size_t draft_size = llm_ctx_draft ? llama_state_seq_get_size_ext(llm_ctx_draft, seq, flags) : 0;
+                // One bounded checkpoint per slot; fall back to full prefill on failure.
+                constexpr size_t max_checkpoint_bytes = size_t(768) * 1024 * 1024;
+                if (target_size && target_size <= max_checkpoint_bytes && draft_size <= max_checkpoint_bytes - target_size) {
+                    try {
+                        entry.checkpoint_tgt.resize(target_size);
+                        entry.checkpoint_dft.resize(draft_size);
+                        bool ok = llama_state_seq_get_data_ext(llm_ctx, entry.checkpoint_tgt.data(), target_size, seq, flags) == target_size;
+                        if (draft_size) ok = ok && llama_state_seq_get_data_ext(llm_ctx_draft, entry.checkpoint_dft.data(), draft_size, seq, flags) == draft_size;
+                        if (spec) ok = common_speculative_get_state(spec.get(), seq, entry.checkpoint_spec) &&
+                                       !entry.checkpoint_spec.empty() && ok;
+                        if (ok) {
+                            entry.checkpoint_tokens = checkpoint_task->processed_tokens;
+                            entry.checkpoint_pos = checkpoint_task->n_prefilling_request - 1;
+                        }
+                    } catch (const std::bad_alloc &) {
+                        entry.checkpoint_pos = 0;
+                    }
+                }
+                if (!entry.checkpoint_pos) {
+                    entry.checkpoint_tgt.clear(); entry.checkpoint_dft.clear(); entry.checkpoint_spec.clear();
+                }
+            }
+            i_batch_view += n_batch_view;
         }
 
         return decoded;
@@ -3994,6 +4098,13 @@ struct httpserver {
 
                 if (batch_task_type == TASK_COMPLETIONS) {
                     auto * task = dynamic_cast<completions_task *>(task_ptr.get());
+                    if (hybrid_cache_unhealthy) {
+                        json data = { { "message", "hybrid cache state is unhealthy; restart the model server" } };
+                        process_task_results[tid]->enqueue(
+                            std::make_unique<btask_result>(httplib::InternalServerError_500, std::move(data)));
+                        release_completion_task(task);
+                        continue;
+                    }
                     if (task->processed_tokens.capacity() == 0) {
                         task->processed_tokens.reserve(task->n_decoding_budget >= INT32_MAX ?
                                                            task->n_prefilling_request :
@@ -4082,6 +4193,12 @@ struct httpserver {
                                     continue;
                                 }
                                 size_t lcp_l = common_lcp(cache.tokens, tokens);
+                                if (hybrid_prompt_cache) {
+                                    lcp_l = !task->tokenized_prompts_include_multimedias &&
+                                            task->get_lora_adapters().empty() && cache.checkpoint_pos > 0 &&
+                                            cache.pos >= cache.checkpoint_pos && cache.tokens.size() >= tokens.size() &&
+                                            cache.checkpoint_tokens == tokens ? tokens.size() : 0;
+                                }
                                 if (lcp_l > seq_lcp_l) {
                                     seq_lcp_id          = i;
                                     seq_lcp_l           = lcp_l;
@@ -4103,6 +4220,19 @@ struct httpserver {
                             else {
                                 int32_t   cached = int32_t(seq_lcp_l) - 1;
                                 llama_pos pos    = std::min(seq_lcp_pos - 1, cached);
+                                if (hybrid_prompt_cache) {
+                                    auto & checkpoint = cache_prompts.at(seq_id);
+                                    const auto flags = LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY;
+                                    bool ok = checkpoint.checkpoint_pos == cached && !checkpoint.checkpoint_tgt.empty() &&
+                                        llama_state_seq_set_data_ext(llm_ctx, checkpoint.checkpoint_tgt.data(), checkpoint.checkpoint_tgt.size(), seq_id, flags) == checkpoint.checkpoint_tgt.size();
+                                    if (ok && llm_ctx_draft) {
+                                        ok = !checkpoint.checkpoint_dft.empty() &&
+                                            llama_state_seq_set_data_ext(llm_ctx_draft, checkpoint.checkpoint_dft.data(), checkpoint.checkpoint_dft.size(), seq_id, flags) == checkpoint.checkpoint_dft.size();
+                                    }
+                                    if (ok && spec) common_speculative_set_state(spec.get(), seq_id, checkpoint.checkpoint_spec);
+                                    if (!ok) { cached = 0; pos = 0; }
+                                    else pos = cached;
+                                }
                                 // request the same longer prefill context again but the cache has discarded.
                                 if (seq_lcp_pos_discard > 0 && seq_lcp_l == tokens.size()) {
                                     cached = 0;
@@ -4141,15 +4271,31 @@ struct httpserver {
                             cache.pos_discard = task->pos > 0 ? cache.pos_discard : 0;
                             task->set_seq_id(seq_id);
                             // clean kv cache
-                            llama_memory_seq_rm(llama_get_memory(llm_ctx), seq_id, task->pos, -1);
+                            bool cache_trim_ok = llama_memory_seq_rm(llama_get_memory(llm_ctx), seq_id, task->pos, -1);
                             if (llm_ctx_draft != nullptr) {
-                                llama_memory_seq_rm(llama_get_memory(llm_ctx_draft), seq_id, task->pos, -1);
+                                cache_trim_ok = llama_memory_seq_rm(llama_get_memory(llm_ctx_draft), seq_id, task->pos, -1) && cache_trim_ok;
+                            }
+                            if (hybrid_prompt_cache && !cache_trim_ok) {
+                                clear_completion_sequence(seq_id);
+                                task->pos = task->n_prefilled = task->n_prefilled_cached = task->n_processed_detokenized = 0;
+                            }
+                            if (hybrid_prompt_cache && task->pos == 0) {
+                                cache.checkpoint_tokens.clear(); cache.checkpoint_tgt.clear(); cache.checkpoint_dft.clear();
+                                cache.checkpoint_spec.clear(); cache.checkpoint_pos = 0;
                             }
                             SRV_DBG(
                                 "rid %s | prefix cache, "
                                 "clean kv cache, seq %d = [%d, end)\n",
                                 rid.c_str(), seq_id, task->pos);
                             llm_kv_cache_used += task->pos;
+                            if (hybrid_cache_unhealthy) {
+                                cache.used = false;
+                                json data = { { "message", "hybrid cache state is unhealthy; restart the model server" } };
+                                process_task_results[tid]->enqueue(
+                                    std::make_unique<btask_result>(httplib::InternalServerError_500, std::move(data)));
+                                release_completion_task(task);
+                                continue;
+                            }
                         }
 
                         if (dynamic_context_enabled() && !task->dynamic_context_admitted) {
@@ -4314,10 +4460,7 @@ struct httpserver {
                         // abort if incomplete prefilling
                         if (task->n_prefilled < task->n_prefilling_request) {
                             // clean kv cache
-                            llama_memory_seq_rm(llama_get_memory(llm_ctx), seq_id, 0, -1);
-                            if (llm_ctx_draft != nullptr) {
-                                llama_memory_seq_rm(llama_get_memory(llm_ctx_draft), seq_id, 0, -1);
-                            }
+                            clear_completion_sequence(seq_id);
                             SRV_DBG(
                                 "rid %s | prefill, incomplete, "
                                 "clean kv cache, seq %d = [0, end)\n",
@@ -4327,6 +4470,7 @@ struct httpserver {
                             if (cache_prompt) {
                                 cache_prompt_entry & cache = cache_prompts.at(seq_id);
                                 cache.tokens.clear();
+                                cache.invalidate_checkpoint();
                                 cache.used        = false;
                                 cache.pos         = 0;
                                 cache.pos_discard = 0;
@@ -4438,14 +4582,12 @@ struct httpserver {
                         llm_kv_cache_used -= cache.pos;
                         llm_kv_cache_inactive -= cache.pos;
                         cache.tokens.clear();
+                                cache.invalidate_checkpoint();
                         cache.used        = false;
                         cache.pos         = 0;
                         cache.pos_discard = 0;
                         // clean kv cache
-                        llama_memory_seq_rm(llama_get_memory(llm_ctx), seq_id, 0, -1);
-                        if (llm_ctx_draft != nullptr) {
-                            llama_memory_seq_rm(llama_get_memory(llm_ctx_draft), seq_id, 0, -1);
-                        }
+                        clear_completion_sequence(seq_id);
                         SRV_INFV(2,
                                  "rid %s | batching, clean cache, "
                                  "clean kv cache, seq %d = [0, end)\n",
@@ -4521,10 +4663,7 @@ struct httpserver {
                             const std::string rid    = task->get_r_id();
                             const int32_t     seq_id = task->get_seq_id();
                             // clean kv cache
-                            llama_memory_seq_rm(llama_get_memory(llm_ctx), seq_id, 0, -1);
-                            if (llm_ctx_draft != nullptr) {
-                                llama_memory_seq_rm(llama_get_memory(llm_ctx_draft), seq_id, 0, -1);
-                            }
+                            clear_completion_sequence(seq_id);
                             SRV_INFV(2,
                                      "rid %s | decode, "
                                      "clean kv cache, seq %d = [0, end)\n",
@@ -4534,6 +4673,7 @@ struct httpserver {
                             if (cache_prompt) {
                                 cache_prompt_entry & cache = cache_prompts.at(seq_id);
                                 cache.tokens.clear();
+                                cache.invalidate_checkpoint();
                                 cache.used        = false;
                                 cache.pos         = 0;
                                 cache.pos_discard = 0;
@@ -4575,6 +4715,7 @@ struct httpserver {
                             if (cache_prompt) {
                                 cache_prompt_entry & cache = cache_prompts.at(seq_id);
                                 cache.tokens.clear();
+                                cache.invalidate_checkpoint();
                                 cache.used        = false;
                                 cache.pos         = 0;
                                 cache.pos_discard = 0;
@@ -4584,8 +4725,7 @@ struct httpserver {
                                          rid.c_str(), seq_id, llm_kv_cache_used, llm_kv_cache_inactive);
                             }
                             // clean kv cache
-                            llama_memory_seq_rm(llama_get_memory(llm_ctx), seq_id, 0, -1);
-                            llama_memory_seq_rm(llama_get_memory(llm_ctx_draft), seq_id, 0, -1);
+                            clear_completion_sequence(seq_id);
                             SRV_INFV(2,
                                      "rid %s | decode, "
                                      "clean kv cache, seq %d = [0, end)\n",
@@ -5156,11 +5296,11 @@ struct httpserver {
                                     };
                                     process_task_results[tid]->enqueue(std::make_unique<btask_result>(
                                         httplib::InternalServerError_500, std::move(data)));
-                                    llama_memory_seq_rm(llama_get_memory(llm_ctx), seq_id, 0, -1);
-                                    llama_memory_seq_rm(llama_get_memory(llm_ctx_draft), seq_id, 0, -1);
+                                    clear_completion_sequence(seq_id);
                                     if (cache_prompt) {
                                         cache_prompt_entry & cache = cache_prompts.at(seq_id);
                                         cache.tokens.clear();
+                                cache.invalidate_checkpoint();
                                         cache.used        = false;
                                         cache.pos         = 0;
                                         cache.pos_discard = 0;
@@ -5251,10 +5391,7 @@ struct httpserver {
                         task->n_prefilled + task->n_decoded, opened ? task->generated_finish_reason.c_str() : "closed");
                     // clean kv cache
                     if (!cache_prompt) {
-                        llama_memory_seq_rm(llama_get_memory(llm_ctx), seq_id, 0, -1);
-                        if (llm_ctx_draft != nullptr) {
-                            llama_memory_seq_rm(llama_get_memory(llm_ctx_draft), seq_id, 0, -1);
-                        }
+                        clear_completion_sequence(seq_id);
                         SRV_INFV(2,
                                  "rid %s | decode in batch, "
                                  "clean kv cache, seq %d = [0, end)\n",
@@ -5333,10 +5470,7 @@ struct httpserver {
                 }
                 // clean kv cache
                 if (llm_kv_cache_shift) {
-                    llama_memory_seq_rm(llama_get_memory(llm_ctx), seq_id, 0, -1);
-                    if (llm_ctx_draft != nullptr) {
-                        llama_memory_seq_rm(llama_get_memory(llm_ctx_draft), seq_id, 0, -1);
-                    }
+                    clear_completion_sequence(seq_id);
                     SRV_INFV(2,
                              "rid %s | decode in batch, "
                              "clean kv cache, seq %d = [0, end)\n",

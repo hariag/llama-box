@@ -43,3 +43,20 @@ c++ -std=c++17 -Illama.cpp/ggml/include tests/test_ggml_sage_attention.cpp \
   -L"$BUILD/bin" -Wl,-rpath,"$BUILD/bin" -lggml -lggml-base -o /tmp/test-ggml-sage
 /tmp/test-ggml-sage
 ```
+
+Qwen35 hybrid prompt caching retains one checkpoint per idle slot for an
+identical text-only prompt, without moving KV positions. The last prompt token
+is evaluated again for logits. Different prompts, multimodal input, LoRA and
+embedding mode do not use this checkpoint. MTP target, draft and speculative
+state are restored together; separate draft models are excluded. Each slot's
+checkpoint is capped at 768 MiB, after which the server falls back to prefill.
+The server-wide `--no-cache-prompt` switch disables caching. Checkpoints are
+in-memory and can be evicted under capacity pressure. The current implementation
+does not reuse a merely shared prefix or honor a per-request `cache_prompt`
+override.
+
+To compare a candidate against an otherwise identical server started with
+`--no-cache-prompt`, run `tests/test_qwen_prompt_cache.py --candidate URL
+--reference URL --require-hit`. Add `--require-mtp` for MTP and `--concurrency`
+when the candidate has at least two slots. The test sends requests to both
+servers and should be run against isolated test instances.
