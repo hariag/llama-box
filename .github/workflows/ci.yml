@@ -247,7 +247,7 @@ jobs:
             distro_container_image: 'gpustack/devel-cpu:centos7-v2'
           - arch: 'amd64'
             instruction: 'avx512'
-            distro_container_image: 'gpustack/devel-cpu:rockylinux8.9-v2'
+            distro_container_image: 'llama-box-ci/cpu-rockylinux8:local'
           - arch: 'arm64'
             instruction: 'neon'
             distro_container_image: 'gpustack/devel-cpu:ubuntu18.04-v2'
@@ -318,6 +318,12 @@ jobs:
           EOF
           chmod +x /tmp/entrypoint.sh
           cat /tmp/entrypoint.sh
+          # The historical GPUStack development image is no longer public.
+          # Build from Rocky 8 to retain the artifact's glibc compatibility.
+          if [ "${{ matrix.distro_container_image }}" = "llama-box-ci/cpu-rockylinux8:local" ]; then
+            docker build -f .github/ci/cpu-rockylinux8.Dockerfile \
+              -t llama-box-ci/cpu-rockylinux8:local .github/ci
+          fi
 
           docker run \
             --rm \
@@ -348,9 +354,9 @@ jobs:
       matrix:
         include:
           - arch: 'amd64'
-            distro_container_image: 'gpustack/devel-cpu:rockylinux8.9-v2'
+            distro_container_image: 'llama-box-ci/cpu-rockylinux8:local'
           - arch: 'arm64'
-            distro_container_image: 'gpustack/devel-cpu:rockylinux8.9-v2'
+            distro_container_image: 'llama-box-ci/cpu-rockylinux8:local'
     runs-on: ${{ matrix.arch == 'amd64' && 'ubuntu-22.04' || 'ubuntu-22.04-arm' }}
     steps:
       - name: Maximize Root Space
@@ -418,6 +424,12 @@ jobs:
 
           chmod +x /tmp/entrypoint.sh
           cat /tmp/entrypoint.sh
+          # The historical GPUStack development image is no longer public.
+          # Build from Rocky 8 to retain the artifact's glibc compatibility.
+          if [ "${{ matrix.distro_container_image }}" = "llama-box-ci/cpu-rockylinux8:local" ]; then
+            docker build -f .github/ci/cpu-rockylinux8.Dockerfile \
+              -t llama-box-ci/cpu-rockylinux8:local .github/ci
+          fi
 
           docker run \
             --rm \
@@ -454,7 +466,7 @@ jobs:
         include:
           - arch: 'amd64'
             version: '12.8'
-            distro_container_image: 'gpustack/devel-nvidia-cuda:12.8.0-rockylinux8-v2'
+            distro_container_image: 'llama-box-ci/cuda-rockylinux8:12.8'
             cuda_arch: '60-real;61-real;70-real;75-real;80-real;86-real;87-real;89-real;90-real;100-real;101-real;120-real'
             install_build_deps: '0'
           - arch: 'amd64'
@@ -478,7 +490,7 @@ jobs:
             install_build_deps: '1'
           - arch: 'arm64'
             version: '12.8'
-            distro_container_image: 'gpustack/devel-nvidia-cuda:12.8.0-rockylinux8-v2'
+            distro_container_image: 'llama-box-ci/cuda-rockylinux8:12.8'
             cuda_arch: '60-real;61-real;70-real;75-real;80-real;86-real;87-real;89-real;90-real;100-real;101-real;120-real'
             install_build_deps: '0'
           - arch: 'arm64'
@@ -505,6 +517,11 @@ jobs:
           path: |
             ${{ github.workspace }}/.ccache
             ${{ github.workspace }}/.sccache
+      - name: Build Rocky Linux 8 CUDA development image
+        if: matrix.version == '12.8'
+        run: |
+          docker build -f .github/ci/cuda-rockylinux8.Dockerfile \
+            -t llama-box-ci/cuda-rockylinux8:12.8 .github/ci
       - name: Build DL
         env:
           CCACHE_DIR: "${{ github.workspace }}/.ccache"
@@ -1670,7 +1687,13 @@ jobs:
           $ProgressPreference = 'SilentlyContinue'
 
           choco install sccache ninja curl -y
-          choco install openssl --version 4.0.1 -y
+          # The Windows runner already includes the full OpenSSL development SDK.
+          # Avoid the version-pinned Chocolatey installer, whose upstream URL expires.
+          if (-not (Test-Path "C:\Program Files\OpenSSL\include\openssl\ssl.h")) {
+            throw "The runner OpenSSL development headers are missing"
+          }
+          & "C:\Program Files\OpenSSL\bin\openssl.exe" version
+          if ($LASTEXITCODE -ne 0) { throw "The runner OpenSSL installation is unusable" }
       - name: Setup
         run: |
           $ErrorActionPreference = "Stop"
@@ -1754,7 +1777,13 @@ jobs:
           $ProgressPreference = 'SilentlyContinue'
 
           choco install sccache ninja curl -y
-          choco install openssl --version 4.0.1 -y
+          # The Windows runner already includes the full OpenSSL development SDK.
+          # Avoid the version-pinned Chocolatey installer, whose upstream URL expires.
+          if (-not (Test-Path "C:\Program Files\OpenSSL\include\openssl\ssl.h")) {
+            throw "The runner OpenSSL development headers are missing"
+          }
+          & "C:\Program Files\OpenSSL\bin\openssl.exe" version
+          if ($LASTEXITCODE -ne 0) { throw "The runner OpenSSL installation is unusable" }
       - name: Setup
         run: |
           $ErrorActionPreference = "Stop"
@@ -1845,7 +1874,13 @@ jobs:
           $ProgressPreference = 'SilentlyContinue'
 
           choco install sccache ninja curl -y
-          choco install openssl --version 4.0.1 -y
+          # The Windows runner already includes the full OpenSSL development SDK.
+          # Avoid the version-pinned Chocolatey installer, whose upstream URL expires.
+          if (-not (Test-Path "C:\Program Files\OpenSSL\include\openssl\ssl.h")) {
+            throw "The runner OpenSSL development headers are missing"
+          }
+          & "C:\Program Files\OpenSSL\bin\openssl.exe" version
+          if ($LASTEXITCODE -ne 0) { throw "The runner OpenSSL installation is unusable" }
       - name: Setup CUDA
         run: |
           $ErrorActionPreference = "Stop"
@@ -1996,7 +2031,13 @@ jobs:
           $ProgressPreference = 'SilentlyContinue'
 
           choco install sccache ninja curl -y
-          choco install openssl --version 4.0.1 -y
+          # The Windows runner already includes the full OpenSSL development SDK.
+          # Avoid the version-pinned Chocolatey installer, whose upstream URL expires.
+          if (-not (Test-Path "C:\Program Files\OpenSSL\include\openssl\ssl.h")) {
+            throw "The runner OpenSSL development headers are missing"
+          }
+          & "C:\Program Files\OpenSSL\bin\openssl.exe" version
+          if ($LASTEXITCODE -ne 0) { throw "The runner OpenSSL installation is unusable" }
       - name: Setup HIP
         run: |
           $ErrorActionPreference = "Stop"
@@ -2146,7 +2187,13 @@ jobs:
           $ProgressPreference = 'SilentlyContinue'
 
           choco install sccache ninja curl -y
-          choco install openssl --version 4.0.1 -y
+          # The Windows runner already includes the full OpenSSL development SDK.
+          # Avoid the version-pinned Chocolatey installer, whose upstream URL expires.
+          if (-not (Test-Path "C:\Program Files\OpenSSL\include\openssl\ssl.h")) {
+            throw "The runner OpenSSL development headers are missing"
+          }
+          & "C:\Program Files\OpenSSL\bin\openssl.exe" version
+          if ($LASTEXITCODE -ne 0) { throw "The runner OpenSSL installation is unusable" }
       - name: Setup oneAPI
         run: |
           $ErrorActionPreference = "Stop"
@@ -2287,7 +2334,13 @@ jobs:
           $ProgressPreference = 'SilentlyContinue'
 
           choco install sccache ninja curl -y
-          choco install openssl --version 4.0.1 -y
+          # The Windows runner already includes the full OpenSSL development SDK.
+          # Avoid the version-pinned Chocolatey installer, whose upstream URL expires.
+          if (-not (Test-Path "C:\Program Files\OpenSSL\include\openssl\ssl.h")) {
+            throw "The runner OpenSSL development headers are missing"
+          }
+          & "C:\Program Files\OpenSSL\bin\openssl.exe" version
+          if ($LASTEXITCODE -ne 0) { throw "The runner OpenSSL installation is unusable" }
       - name: Setup Vulkan
         run: |
           $ErrorActionPreference = "Stop"
