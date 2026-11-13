@@ -16,6 +16,7 @@ RUN case "$CANN_ARCH" in x86_64|aarch64) ;; *) echo 'unsupported CANN_ARCH' >&2;
     && apt-get install -y --no-install-recommends \
       curl ca-certificates gnupg \
     && curl -fL --retry 3 'https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xC8EC952E2A0E1FBDC5090F6A2C277A0A352154E5' -o /tmp/toolchain-key.asc \
+    && install -d -m 0700 /root/.gnupg \
     && fingerprint="$(gpg --with-colons --import-options show-only --dry-run --import /tmp/toolchain-key.asc | awk -F: '$1 == "fpr" { print $10; exit }')" \
     && test "$fingerprint" = C8EC952E2A0E1FBDC5090F6A2C277A0A352154E5 \
     && gpg --dearmor < /tmp/toolchain-key.asc > /usr/share/keyrings/ubuntu-toolchain-r.gpg \
