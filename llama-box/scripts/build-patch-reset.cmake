@@ -16,9 +16,9 @@ endif ()
 foreach (VENDOR_PATH ${VENDOR_PATHS})
     get_filename_component(VENDOR_NAME ${VENDOR_PATH} NAME)
     execute_process(
-            COMMAND ${GIT_EXECUTABLE} -C ${VENDOR_PATH} reset --hard
-            COMMAND ${GIT_EXECUTABLE} -C ${VENDOR_PATH} clean -df
-            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+            COMMAND ${GIT_EXECUTABLE} reset --hard
+            COMMAND ${GIT_EXECUTABLE} clean -df
+            WORKING_DIRECTORY ${VENDOR_PATH}
             RESULT_VARIABLE PATCH_RESULT
     )
     if (NOT PATCH_RESULT EQUAL 0)

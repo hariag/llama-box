@@ -19,14 +19,14 @@ foreach (VENDOR_PATH ${VENDOR_PATHS})
     file(GLOB_RECURSE PATCHES "${CMAKE_CURRENT_SOURCE_DIR}/patches/${VENDOR_NAME}/*.patch")
     foreach (PATCH_FILE ${PATCHES})
         execute_process(
-                COMMAND ${GIT_EXECUTABLE} -C ${VENDOR_PATH} apply --check ${PATCH_FILE}
-                WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+                COMMAND ${GIT_EXECUTABLE} apply --check ${PATCH_FILE}
+                WORKING_DIRECTORY ${VENDOR_PATH}
                 RESULT_VARIABLE PATCH_RESULT
         )
         if (PATCH_RESULT EQUAL 0)
             execute_process(
-                    COMMAND ${GIT_EXECUTABLE} -C ${VENDOR_PATH} apply --whitespace=nowarn ${PATCH_FILE}
-                    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+                    COMMAND ${GIT_EXECUTABLE} apply --whitespace=nowarn ${PATCH_FILE}
+                    WORKING_DIRECTORY ${VENDOR_PATH}
             )
             message(STATUS "  Applied ${PATCH_FILE}")
         else ()

@@ -15,9 +15,6 @@
 // global json alias, so keep the legacy alias local to this layer.
 using json = nlohmann::json;
 
-// Kept as a compatibility declaration for llama-box's existing verbosity
-// macros.  New upstream code should prefer common_log_get_verbosity_thold().
-extern int common_log_verbosity_thold;
 
 static inline std::string common_model_alias_value(const common_params & params) {
     return params.model_alias.empty() ? params.model.path : *params.model_alias.begin();
@@ -55,25 +52,25 @@ static inline int32_t llama_box_memory_tokens(const llama_context * ctx) {
 
 #define SRV_INF(fmt, ...) LOG_INF("srv %25.*s: " fmt, 25, __func__, __VA_ARGS__)
 #define SRV_INFV(v, fmt, ...)                                   \
-    if (common_log_verbosity_thold >= v) {                      \
+    if (common_log_get_verbosity_thold() >= v) {                      \
         LOG_INF("srv %25.*s: " fmt, 25, __func__, __VA_ARGS__); \
     }
 #define SRV_WRN(fmt, ...) LOG_WRN("srv %25.*s: " fmt, 25, __func__, __VA_ARGS__)
 #define SRV_ERR(fmt, ...) LOG_ERR("srv %25.*s: " fmt, 25, __func__, __VA_ARGS__)
 #define SRV_DBG(fmt, ...)                                       \
-    if (common_log_verbosity_thold > 5) {                       \
+    if (common_log_get_verbosity_thold() > 5) {                       \
         LOG_DBG("srv %25.*s: " fmt, 25, __func__, __VA_ARGS__); \
     }
 
 #define SRV_FUNC_INF(func, fmt, ...) LOG_INF("srv %25.*s: " fmt, 25, func, __VA_ARGS__)
 #define SRV_FUNC_INFV(v, func, fmt, ...)                    \
-    if (common_log_verbosity_thold >= v) {                  \
+    if (common_log_get_verbosity_thold() >= v) {                  \
         LOG_INF("srv %25.*s: " fmt, 25, func, __VA_ARGS__); \
     }
 #define SRV_FUNC_WRN(func, fmt, ...) LOG_WRN("srv %25.*s: " fmt, 25, func, __VA_ARGS__)
 #define SRV_FUNC_ERR(func, fmt, ...) LOG_ERR("srv %25.*s: " fmt, 25, func, __VA_ARGS__)
 #define SRV_FUNC_DBG(func, fmt, ...)                        \
-    if (common_log_verbosity_thold > 5) {                   \
+    if (common_log_get_verbosity_thold() > 5) {                   \
         LOG_DBG("srv %25.*s: " fmt, 25, func, __VA_ARGS__); \
     }
 

@@ -5,7 +5,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl gnupg make git patch pkg-config libopenblas-dev perl tar gzip \
  && curl -fL --retry 3 'https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xC8EC952E2A0E1FBDC5090F6A2C277A0A352154E5' -o /tmp/toolchain-key.asc \
- && fingerprint="$(gpg --show-keys --with-colons /tmp/toolchain-key.asc | awk -F: '$1 == "fpr" { print $10; exit }')" \
+ && install -d -m 0700 /root/.gnupg \
+ && fingerprint="$(gpg --with-colons --import-options show-only --dry-run --import /tmp/toolchain-key.asc | awk -F: '$1 == "fpr" { print $10; exit }')" \
  && test "$fingerprint" = C8EC952E2A0E1FBDC5090F6A2C277A0A352154E5 \
  && gpg --dearmor < /tmp/toolchain-key.asc > /usr/share/keyrings/ubuntu-toolchain-r.gpg \
  && printf '%s\n' 'deb [signed-by=/usr/share/keyrings/ubuntu-toolchain-r.gpg] https://ppa.launchpadcontent.net/ubuntu-toolchain-r/test/ubuntu bionic main' > /etc/apt/sources.list.d/ubuntu-toolchain-r.list \

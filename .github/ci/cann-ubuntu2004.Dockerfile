@@ -14,9 +14,18 @@ RUN case "$CANN_ARCH" in x86_64|aarch64) ;; *) echo 'unsupported CANN_ARCH' >&2;
     && case "$CANN_VERSION" in 8.1.RC1|8.2.RC1) ;; *) echo 'unsupported CANN_VERSION' >&2; exit 1;; esac \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
-      gcc-11 g++-11 build-essential cmake git patch pkg-config curl wget perl ca-certificates \
+      curl ca-certificates gnupg \
+    && curl -fL --retry 3 'https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xC8EC952E2A0E1FBDC5090F6A2C277A0A352154E5' -o /tmp/toolchain-key.asc \
+    && install -d -m 0700 /root/.gnupg \
+    && fingerprint="$(gpg --with-colons --import-options show-only --dry-run --import /tmp/toolchain-key.asc | awk -F: '$1 == "fpr" { print $10; exit }')" \
+    && test "$fingerprint" = C8EC952E2A0E1FBDC5090F6A2C277A0A352154E5 \
+    && gpg --dearmor < /tmp/toolchain-key.asc > /usr/share/keyrings/ubuntu-toolchain-r.gpg \
+    && printf '%s\n' 'deb [signed-by=/usr/share/keyrings/ubuntu-toolchain-r.gpg] https://ppa.launchpadcontent.net/ubuntu-toolchain-r/test/ubuntu focal main' > /etc/apt/sources.list.d/ubuntu-toolchain-r.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+      gcc-11 g++-11 build-essential cmake git patch pkg-config wget perl \
       tar gzip gnupg python3 python3-pip python3-dev unzip pciutils net-tools libblas-dev gfortran patchelf \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* /tmp/toolchain-key.asc
 ENV CC=gcc-11 CXX=g++-11
 
 # CANN toolkit runtime dependencies; numpy/protobuf/scipy are pinned to

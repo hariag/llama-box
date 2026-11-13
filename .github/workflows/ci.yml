@@ -1428,7 +1428,8 @@ jobs:
           echo "===== SCRIPT ====="
           cat <<EOF > /tmp/entrypoint.sh
           #!/bin/bash
-          source /opt/intel/oneapi/setvars.sh > /dev/null || exit 1
+          if [ "\${SETVARS_COMPLETED:-}" != 1 ]; then source /opt/intel/oneapi/setvars.sh > /dev/null || exit 1; fi
+          command -v icx > /dev/null && command -v icpx > /dev/null || exit 1
           git config --system --add safe.directory '*'
           echo "===== BUILD ====="
           env || true
@@ -1489,7 +1490,8 @@ jobs:
           echo "===== SCRIPT ====="
           cat <<EOF > /tmp/entrypoint.sh
           #!/bin/bash
-          source /opt/intel/oneapi/setvars.sh > /dev/null || exit 1
+          if [ "\${SETVARS_COMPLETED:-}" != 1 ]; then source /opt/intel/oneapi/setvars.sh > /dev/null || exit 1; fi
+          command -v icx > /dev/null && command -v icpx > /dev/null || exit 1
           git config --system --add safe.directory '*'
           echo "===== BUILD ====="
           env || true

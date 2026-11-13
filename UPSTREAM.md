@@ -10,11 +10,12 @@ The November 2026 CUDA update merges ggml-org/llama.cpp at
 integration uses `tools/mtmd` from upstream
 `b65bf69213d72a1bb0c9648fad26ac7adf9e73ea`, immediately before the removal
 of the `clip` interfaces used by llama-box. It also carries the small
-llama-box compatibility helpers. Later mtmd changes are not part of this
-update and require migration to the public mtmd API.
+llama-box compatibility helpers. Selected later changes, including Gemma 4
+streaming audio encoding, have been backported to that interface. Other later
+mtmd changes require migration to the public mtmd API.
 
 The fork adds ggml operations and uses 160-byte tensor names. Its RPC protocol
-uses a fork-specific major version, and the patch field identifies the tensor
+uses fork-specific major version 11, and the patch field identifies the tensor
 name size. Clients reject mismatched protocol versions and name sizes. Upgrade
 all llama-box RPC workers and the main server together.
 The pinned stable-diffusion.cpp remains `e29085a5cdf6365dee4cbacddf4d889b104bb498`.
@@ -24,6 +25,12 @@ fork; an apply warning by itself does not mean a change is missing. Check both
 the fork contents and the relevant build configuration before changing them.
 The build scripts modify submodule worktrees and, unless `BOX_PATCH_DEBUG` is
 enabled, reset them after building. Build from clean, disposable checkouts.
+
+The model update also includes Gemma 4 chat fixes, Qwen4exp MTP support,
+DeepSeek V4.1 legacy MXFP8 loading and DFlash/DSpark server integration.
+DeepSeek V4.1 prompt checkpoint reuse is not implemented. DFlash/DSpark
+requires a compatible draft model, sufficient sequence rollback, and a
+draft size smaller than the microbatch; multimodal prefill is not supported.
 
 Before refreshing the fork, check ggml operation numbers, RPC compatibility,
 model and mtmd APIs, and stable-diffusion.cpp's use of the shared ggml backend.
