@@ -27,6 +27,7 @@
 #define SELF_PACKAGE 0
 #include "z_multimodal.hpp"
 #include "z_stablediffusion.hpp"
+#include "z_utf8_stream.hpp"
 #include "z_utils.hpp"
 #include "chat_template_request.hpp"
 
@@ -2282,16 +2283,18 @@ struct completions_task : btask {
             for (size_t i = 0; i < probs_size; i++) {
                 const llama_token id    = processed_tokens[tokens_size - probs_size + i];
                 const std::string token = tokens_to_output_formatted_string(llm_ctx, id);
+                const std::string token_raw = id == LLAMA_TOKEN_NULL ? "" : common_token_to_piece(llm_ctx, id);
                 float             token_logprob =
                     generated_probs[i] == 0.0f ? std::numeric_limits<float>::lowest() : std::log(generated_probs[i]);
-                std::vector<unsigned char> token_bytes(token.begin(), token.end());
+                std::vector<unsigned char> token_bytes(token_raw.begin(), token_raw.end());
                 json                       token_top_logprobs = json::array();
                 for (const auto & tp : generated_top_probs[i]) {
                     const llama_token tp_id    = tp.first;
                     const std::string tp_token = tokens_to_output_formatted_string(llm_ctx, tp_id);
+                    const std::string tp_raw = tp_id == LLAMA_TOKEN_NULL ? "" : common_token_to_piece(llm_ctx, tp_id);
                     float             tp_token_logprob =
                         tp.second == 0.0f ? std::numeric_limits<float>::lowest() : std::log(tp.second);
-                    std::vector<unsigned char> tp_token_bytes(tp_token.begin(), tp_token.end());
+                    std::vector<unsigned char> tp_token_bytes(tp_raw.begin(), tp_raw.end());
                     token_top_logprobs.push_back(json{
                         { "token",   tp_token         },
                         { "logprob", tp_token_logprob },
@@ -5093,15 +5096,16 @@ struct httpserver {
                         //// check stop word or tool call
                         if (send_text) {
                             // has stop words
+                            size_t stop_pos = std::string::npos;
                             for (const std::string & word : task->req->stop) {
-                                size_t pos =
-                                    task->generated_text.find(word, task->generated_text.size() - sampled_str.size());
-                                if (pos != std::string::npos) {
-                                    SRV_DBG("rid %s | stopped by word\n", rid.c_str());
-                                    task->generated_finish_reason = "stop";
-                                    task->generated_text_keep_pos = pos;
-                                    break;
+                                if (!word.empty()) {
+                                    stop_pos = std::min(stop_pos, task->generated_text.find(word));
                                 }
+                            }
+                            if (stop_pos != std::string::npos) {
+                                SRV_DBG("rid %s | stopped by word\n", rid.c_str());
+                                task->generated_finish_reason = "stop";
+                                task->generated_text_keep_pos = stop_pos;
                             }
                             // has reasoning
                             if (support_reasoning && !task->reasoning_finished &&
@@ -5391,13 +5395,13 @@ struct httpserver {
                                     SRV_DBG("rid %s | stopped by tool call\n", rid.c_str());
                                     task->generated_finish_reason = "tool_calls";
                                 }
-                                task->generated_text_keep_pos = task->generated_text.size();
+                                task->generated_text_keep_pos = get_position_of_utf8(task->generated_text);
                             }
                             // no enough budget
                             else if (task->n_decoding_budget <= 0) {
                                 SRV_DBG("rid %s | stopped by length\n", rid.c_str());
                                 task->generated_finish_reason = "length";
-                                task->generated_text_keep_pos = task->generated_text.size();
+                                task->generated_text_keep_pos = get_position_of_utf8(task->generated_text);
                             }
                         }
                     }
@@ -5406,26 +5410,38 @@ struct httpserver {
                     if (task->generated_finish_reason.empty()) {
                         // stream outputting
                         if (send_text && task_ptr->is_stream()) {
+                            // A suffix may be the beginning of a stop string. Keep it
+                            // buffered until it matches or later bytes disprove it.
+                            size_t partial_stop = std::string::npos;
+                            for (const std::string & word : task->req->stop) {
+                                partial_stop = std::min(partial_stop,
+                                    string_find_partial_stop(task->generated_text, word));
+                            }
                             // fine-grained streaming: emit one SSE chunk per token when the
                             // per-token offsets are valid (pure-text generation). Falls back to
                             // one batched chunk per decode round when word-mode/tool-call
                             // handling has shifted the text (offsets invalidated).
-                            if (!task->stream_token_offsets.empty()) {
-                                size_t prev = 0;
-                                for (size_t off : task->stream_token_offsets) {
-                                    const size_t len = off - prev;  // bytes of this token
-                                    prev = off;
-                                    if (len == 0) continue;
+                            const auto chunk_lengths = utf8_stream_chunk_lengths(
+                                task->generated_text, task->stream_token_offsets);
+                            if (partial_stop != std::string::npos) {
+                                if (partial_stop > 0) {
+                                    task->generated_text_keep_pos = partial_stop;
+                                    json data = task->to_json(llm_ctx, reasoning_in_content);
+                                    process_task_results[tid]->enqueue(
+                                        std::make_unique<btask_result>(httplib::Continue_100, std::move(data)));
+                                }
+                            } else if (!chunk_lengths.empty()) {
+                                for (size_t len : chunk_lengths) {
                                     json data = task->to_json(llm_ctx, reasoning_in_content, len);
                                     process_task_results[tid]->enqueue(
                                         std::make_unique<btask_result>(httplib::Continue_100, std::move(data)));
                                 }
-                                task->stream_token_offsets.clear();
                             } else {
                                 json data = task->to_json(llm_ctx, reasoning_in_content);
                                 process_task_results[tid]->enqueue(
                                     std::make_unique<btask_result>(httplib::Continue_100, std::move(data)));
                             }
+                            task->stream_token_offsets.clear();
                         }
                         // speculative
                         if (!task->tokenized_prompts_include_multimedias) {
