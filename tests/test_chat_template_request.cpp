@@ -136,6 +136,44 @@ static void test_jinja_tool_call_requires_a_closed_envelope_before_stop() {
     assert(!llama_box_jinja_tool_call_has_envelope("ordinary response"));
 }
 
+static void test_jinja_tool_call_spans_preserve_following_calls() {
+    const std::string first =
+        "<tool_call>\n<function=first>\n<parameter=id>\none\n</parameter>\n</function>\n</tool_call>";
+    const std::string second =
+        "<tool_call>\n<function=second>\n<parameter=id>\ntwo\n</parameter>\n</function>\n</tool_call>";
+    const std::string text = "before " + first + "\n" + second.substr(0, 24);
+    const auto first_span = llama_box_find_jinja_tool_call(text);
+    assert(first_span.start == 7);
+    assert(first_span.end == 7 + first.size());
+    assert(!first_span.missing_open);
+
+    const std::string rest = text.substr(first_span.end);
+    const auto next_span = llama_box_find_jinja_tool_call(rest);
+    assert(next_span.start == 1);
+    assert(next_span.end == std::string::npos);
+
+    const auto missing_open = llama_box_find_jinja_tool_call(second.substr(std::string("<tool_call>\n").size()));
+    assert(missing_open.start == 0);
+    assert(missing_open.end != std::string::npos);
+    assert(missing_open.missing_open);
+
+    const std::string gemma = "prefix <|tool_call>call:lookup{}<tool_call|> tail";
+    const auto gemma_span = llama_box_find_jinja_tool_call(gemma);
+    assert(gemma_span.start == 7);
+    assert(gemma.substr(gemma_span.end) == " tail");
+}
+
+static void test_jinja_tool_call_partial_markers_are_buffered() {
+    for (const std::string marker : { "<tool_call>", "<function=", "<|tool_call>" }) {
+        for (size_t split = 1; split < marker.size(); ++split) {
+            const std::string text = "answer " + marker.substr(0, split);
+            assert(llama_box_jinja_tool_call_partial_start(text) == 7);
+        }
+    }
+    const std::string text = "answer <ordinary text";
+    assert(llama_box_jinja_tool_call_partial_start(text) == text.size());
+}
+
 static void test_prefilled_reasoning_prompt_state() {
     assert(llama_box_reasoning_is_prefilled(
         "<|im_start|>assistant\n<think>\n", "<think>", "</think>"));
@@ -190,6 +228,8 @@ int main() {
     test_message_reasoning_content_is_preserved();
     test_invalid_message_reasoning_content_is_rejected();
     test_jinja_tool_call_requires_a_closed_envelope_before_stop();
+    test_jinja_tool_call_spans_preserve_following_calls();
+    test_jinja_tool_call_partial_markers_are_buffered();
     test_prefilled_reasoning_prompt_state();
     test_reasoning_transition_suppresses_only_delimiter_whitespace();
     test_reasoning_transition_defers_same_batch_content();

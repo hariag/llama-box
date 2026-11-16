@@ -6,6 +6,7 @@
 #include <map>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 #include "nlohmann/json.hpp"
 
@@ -100,6 +101,61 @@ static inline bool llama_box_jinja_tool_call_is_complete(const std::string & gen
     // both the function and outer closing tags prevents a partial XML AST
     // from being reported as a completed tool call.
     return has_tool_call_end && has_function && has_function_end;
+}
+
+struct llama_box_jinja_tool_call_span {
+    size_t start = std::string::npos;
+    size_t end   = std::string::npos;
+    bool   missing_open = false;
+};
+
+static inline llama_box_jinja_tool_call_span llama_box_find_jinja_tool_call(const std::string & text) {
+    static constexpr std::string_view qwen_start = "<tool_call>";
+    static constexpr std::string_view function_start = "<function=";
+    static constexpr std::string_view gemma_start = "<|tool_call>";
+    static constexpr std::string_view function_end = "</function>";
+    static constexpr std::string_view qwen_end = "</tool_call>";
+    static constexpr std::string_view gemma_end = "<tool_call|>";
+
+    llama_box_jinja_tool_call_span span;
+    const size_t qwen = text.find(qwen_start);
+    const size_t function = text.find(function_start);
+    const size_t gemma = text.find(gemma_start);
+    span.start = std::min({ qwen, function, gemma });
+    if (span.start == std::string::npos) {
+        return span;
+    }
+    if (span.start == gemma) {
+        const size_t close = text.find(gemma_end, gemma + gemma_start.size());
+        if (close != std::string::npos) {
+            span.end = close + gemma_end.size();
+        }
+        return span;
+    }
+
+    span.missing_open = span.start == function;
+    const size_t func = text.find(function_start, span.start);
+    const size_t func_end = func == std::string::npos ? std::string::npos : text.find(function_end, func);
+    const size_t close = func_end == std::string::npos ? std::string::npos : text.find(qwen_end, func_end);
+    if (close != std::string::npos) {
+        span.end = close + qwen_end.size();
+    }
+    return span;
+}
+
+// Keep suffixes that may become a tool marker in a later streaming chunk.
+static inline size_t llama_box_jinja_tool_call_partial_start(const std::string & text) {
+    static constexpr std::string_view starts[] = { "<tool_call>", "<function=", "<|tool_call>" };
+    size_t result = text.size();
+    for (const auto start : starts) {
+        const size_t max_prefix = std::min(text.size(), start.size() - 1);
+        for (size_t length = 1; length <= max_prefix; ++length) {
+            if (text.compare(text.size() - length, length, start.data(), length) == 0) {
+                result = std::min(result, text.size() - length);
+            }
+        }
+    }
+    return result;
 }
 
 // A chat template may put the opening reasoning tag in the generation prompt.

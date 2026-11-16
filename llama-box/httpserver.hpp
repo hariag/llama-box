@@ -2201,6 +2201,7 @@ struct completions_task : btask {
     // invalidated (cleared) whenever word-mode/tool-call edits shift the text
     std::vector<size_t> stream_token_offsets;
     std::vector<json>  generated_tool_calls;      // erase after call to_json if streaming
+    size_t             n_generated_tool_calls = 0;
     std::vector<float> generated_probs;           // erase after call get_probs_json if streaming
     std::vector<std::vector<std::pair<llama_token /* tok */, float /* prob */>>>
         generated_top_probs;                      // erase after call get_probs_json if streaming
@@ -5164,51 +5165,78 @@ struct httpserver {
                             if (task->tokenized_prompts_include_tools && task->reasoning_finished) {
                                 //// jinja
                                 if (params.llm_params.use_jinja) {
-                                    const bool has_tool_envelope = llama_box_jinja_tool_call_has_envelope(
-                                        task->generated_text);
-                                    if (has_tool_envelope) {
-                                        // Keep XML control tokens out of the
-                                        // response while the model is still
-                                        // emitting them.  Do not parse the
-                                        // partial AST: common_chat_parse(...,
-                                        // false, ...) is intentionally a full
-                                        // parse and a partial result can
-                                        // contain only "{" for arguments.
-                                        send_text = false;
-                                        if (llama_box_jinja_tool_call_is_complete(task->generated_text)) {
-                                            std::string functions_str = task->generated_text;
-                                            if (!functions_str.empty()) {
-                                                try {
-                                                    common_chat_msg msg = common_chat_parse(common_chat_input_tokenize(llm_vocab, functions_str), false,
-                                                                                            task->tokenized_prompts_syntax);
-                                                    if (!msg.tool_calls.empty()) {
-                                                        for (const common_chat_tool_call & tc : msg.tool_calls) {
-                                                            task->generated_tool_calls.push_back({
-                                                                { "type",     "function"                                },
-                                                                { "function",
-                                                                 { { "name", tc.name }, { "arguments", tc.arguments } } },
-                                                                { "id",       tc.id.empty() ? gen_call_id() : tc.id     },
-                                                            });
-                                                        }
-                                                        if (task->tool_call_stop_fast) {
-                                                            SRV_DBG("rid %s | stopped by tool call\n", rid.c_str());
-                                                            task->generated_finish_reason =
-                                                                "tool_calls";  // send_text = true;
-                                                        }
-                                                        // eat the rest of the text
-                                                        task->generated_text_keep_pos = std::string::npos;
-                                                        task->generated_text.clear();
-                                    task->stream_token_offsets.clear(); // text shifted: per-token offsets invalid
-                                                    }
-                                                } catch (const std::exception & e) {
-                                                    // Preserve malformed model
-                                                    // output instead of hanging
-                                                    // the request with send_text
-                                                    // permanently disabled.
-                                                    send_text = true;
-                                                    task->generated_text_keep_pos = 0;
-                                                }
+                                    bool parsed_call = false;
+                                    bool parse_failed = false;
+                                    for (;;) {
+                                        const auto span = llama_box_find_jinja_tool_call(task->generated_text);
+                                        if (span.start == std::string::npos || span.end == std::string::npos) {
+                                            break;
+                                        }
+
+                                        std::string functions_str = task->generated_text.substr(0, span.end);
+                                        if (span.missing_open) {
+                                            functions_str.insert(span.start, "<tool_call>\n");
+                                        }
+                                        try {
+                                            common_chat_msg msg = common_chat_parse(
+                                                common_chat_input_tokenize(llm_vocab, functions_str), false,
+                                                task->tokenized_prompts_syntax);
+                                            if (msg.tool_calls.empty()) {
+                                                parse_failed = true;
+                                                break;
                                             }
+                                            for (const common_chat_tool_call & tc : msg.tool_calls) {
+                                                json tool_call = {
+                                                    { "type", "function" },
+                                                    { "function", { { "name", tc.name }, { "arguments", tc.arguments } } },
+                                                    { "id", tc.id.empty() ? gen_call_id() : tc.id },
+                                                };
+                                                if (task->is_stream()) {
+                                                    tool_call["index"] = task->n_generated_tool_calls;
+                                                }
+                                                task->n_generated_tool_calls++;
+                                                task->generated_tool_calls.push_back(std::move(tool_call));
+                                            }
+
+                                            // A speculative batch may already contain part of the next call.
+                                            const std::string prefix = task->generated_text.substr(0, span.start);
+                                            const std::string suffix = task->generated_text.substr(span.end);
+                                            task->generated_text = prefix + (task->tool_call_stop_fast ? "" : suffix);
+                                            task->generated_text_keep_pos = std::string::npos;
+                                            task->stream_token_offsets.clear();
+                                            parsed_call = true;
+                                            if (task->tool_call_stop_fast) {
+                                                SRV_DBG("rid %s | stopped by tool call\n", rid.c_str());
+                                                task->generated_finish_reason = "tool_calls";
+                                                break;
+                                            }
+                                        } catch (const std::exception & e) {
+                                            parse_failed = true;
+                                            break;
+                                        }
+                                    }
+
+                                    if (parse_failed) {
+                                        // Preserve malformed output rather than waiting indefinitely.
+                                        send_text = true;
+                                        if (task->generated_finish_reason.empty()) {
+                                            task->generated_text_keep_pos = std::string::npos;
+                                        }
+                                        task->stream_token_offsets.clear();
+                                    } else if (task->generated_finish_reason.empty() && task->is_stream()) {
+                                        const auto next = llama_box_find_jinja_tool_call(task->generated_text);
+                                        size_t keep = llama_box_jinja_tool_call_partial_start(task->generated_text);
+                                        if (next.start != std::string::npos) {
+                                            keep = std::min(keep, next.start);
+                                        }
+                                        if (keep < task->generated_text.size()) {
+                                            task->generated_text_keep_pos = keep;
+                                            task->stream_token_offsets.clear();
+                                        } else {
+                                            task->generated_text_keep_pos = std::string::npos;
+                                        }
+                                        if (parsed_call || keep < task->generated_text.size()) {
+                                            send_text = keep > 0 || !task->generated_tool_calls.empty();
                                         }
                                     }
                                 }
@@ -5327,6 +5355,10 @@ struct httpserver {
                                                         { "function", function      },
                                                         { "id",       gen_call_id() },
                                                     };
+                                                    if (task->is_stream()) {
+                                                        tool_call["index"] = task->n_generated_tool_calls;
+                                                    }
+                                                    task->n_generated_tool_calls++;
                                                     task->generated_tool_calls.push_back(tool_call);
                                                 };
                                                 // json
@@ -5388,7 +5420,7 @@ struct httpserver {
                         if (task->generated_finish_reason.empty()) {
                             // end of generation
                             if (sampled_eog) {
-                                if (task->generated_tool_calls.empty()) {
+                                if (task->n_generated_tool_calls == 0) {
                                     SRV_DBG("rid %s | stopped by EOG\n", rid.c_str());
                                     task->generated_finish_reason = "stop";
                                 } else {
