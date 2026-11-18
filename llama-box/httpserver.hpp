@@ -2108,6 +2108,11 @@ enum task_type {
     TASK_UNKNOWN,
 };
 
+struct btask_stream_state {
+    std::atomic<bool> cancelled{false};
+    bool received_terminal = false; // HTTP worker only
+};
+
 struct btask {
   protected:
     int32_t   id     = -1;
@@ -2119,7 +2124,7 @@ struct btask {
         id(id),
         type(type),
         seq_id(id),
-        is_connection_closed(is_connection_closed) {}
+        socket_closed(is_connection_closed) {}
 
     virtual ~btask() = default;
 
@@ -2150,9 +2155,14 @@ struct btask {
         return empty;
     }
 
-    std::function<bool()> is_connection_closed = []() {
-        return true;
-    };
+    [[nodiscard]] bool is_connection_closed() const {
+        return (stream_state && stream_state->cancelled.load()) || socket_closed();
+    }
+
+    std::shared_ptr<btask_stream_state> stream_state;
+
+  private:
+    const std::function<bool()> socket_closed;
 };
 
 struct completions_task : btask {
@@ -3815,6 +3825,12 @@ struct httpserver {
 
     inline bool support_image() const { return sd_ctx != nullptr; }
 
+    inline void enqueue_disconnected(int32_t task_id) {
+        json data = { { "message", "client disconnected" } };
+        process_task_results[task_id]->enqueue(
+            std::make_unique<btask_result>(httplib::RequestTimeout_408, std::move(data)));
+    }
+
     inline bool clear_completion_sequence(int32_t seq_id) {
         const bool tgt_ok = llama_memory_seq_rm(llama_get_memory(llm_ctx), seq_id, 0, -1);
         const bool dft_ok = !llm_ctx_draft || llama_memory_seq_rm(llama_get_memory(llm_ctx_draft), seq_id, 0, -1);
@@ -4279,14 +4295,9 @@ struct httpserver {
                                 continue;
                             }
                             if (admission == completion_admission_status::wait) {
-                                // A non-streaming handler is waiting for a terminal
-                                // result even after its client disconnects. Wake it
-                                // without consuming the budget or running prefill.
-                                if (!task->is_stream() && task->is_connection_closed()) {
+                                if (task->is_connection_closed()) {
                                     SRV_INF("rid %s | cancelled while waiting for dynamic context admission\n", rid.c_str());
-                                    json data = { { "message", "client disconnected while waiting for context" } };
-                                    process_task_results[tid]->enqueue(
-                                        std::make_unique<btask_result>(httplib::RequestTimeout_408, std::move(data)));
+                                    enqueue_disconnected(tid);
                                     continue;
                                 }
                                 SRV_DBG(
@@ -4299,6 +4310,11 @@ struct httpserver {
                             }
                         }
 
+                        if (task->n_prefilled == 0 && !task->dynamic_context_admitted && task->is_connection_closed()) {
+                            SRV_INF("rid %s | client disconnected before prefill\n", rid.c_str());
+                            enqueue_disconnected(tid);
+                            continue;
+                        }
                         // filter
                         if (llm_kv_cache_used - llm_kv_cache_inactive + task->n_prefilling_request >
                             llm_kv_cache_limit) {
@@ -5642,6 +5658,9 @@ struct httpserver {
                                  rid.c_str(), seq_id, llm_kv_cache_used, llm_kv_cache_inactive);
                     }
                     release_completion_task(task);
+                    if (!opened) {
+                        enqueue_disconnected(tid);
+                    }
                 }
                 return;
             }
@@ -5724,6 +5743,8 @@ struct httpserver {
                     json data = task->to_json();
                     process_task_results[tid]->enqueue(
                         std::make_unique<btask_result>(httplib::OK_200, std::move(data)));
+                } else {
+                    enqueue_disconnected(tid);
                 }
                 SRV_INF(
                     "rid %s | "
@@ -5837,6 +5858,8 @@ struct httpserver {
                 }
                 process_task_results[tid]->enqueue(std::make_unique<btask_result>(
                     task->failed ? httplib::InternalServerError_500 : httplib::OK_200, std::move(data)));
+            } else {
+                enqueue_disconnected(tid);
             }
             SRV_INF(
                 "rid %s | "
@@ -5860,11 +5883,9 @@ struct httpserver {
         const bool        chunk      = stream && json_value(task_ptr->get_stream_options(), "chunk", false);
         const int32_t     chunk_size = json_value(task_ptr->get_stream_options(), "chunk_size", 4096);
 
-        // enqueue task
-        process_tasks->enqueue(std::move(task_ptr));
-
         // non-streaming
         if (!stream) {
+            process_tasks->enqueue(std::move(task_ptr));
             // dequeue result
             std::unique_ptr<btask_result> result_ptr;
             process_task_results[tid]->wait_dequeue(result_ptr);
@@ -5878,10 +5899,16 @@ struct httpserver {
         }
 
         // streaming
+        auto stream_state = std::make_shared<btask_stream_state>();
+        task_ptr->stream_state = stream_state;
         const auto on_chunk = [=](size_t, httplib::DataSink & sink) {
             // dequeue result
             std::unique_ptr<btask_result> result_ptr;
             process_task_results[tid]->wait_dequeue(result_ptr);
+            stream_state->received_terminal = result_ptr->status != httplib::Continue_100;
+            if (result_ptr->status == httplib::RequestTimeout_408) {
+                return false; // The disconnected client has no response to consume.
+            }
 
             // output result
             //// completions or embeddings
@@ -5938,9 +5965,24 @@ struct httpserver {
 
             return true;
         };
+        const auto on_stream_end = [this, tid, stream_state](bool) {
+            if (stream_state->received_terminal) {
+                return;
+            }
+            // The result queue and sequence ID can be reused by the next
+            // request on this worker. Wait for cancellation to finish and
+            // discard queued chunks before returning the worker to the pool.
+            stream_state->cancelled.store(true);
+            std::unique_ptr<btask_result> result_ptr;
+            do {
+                process_task_results[tid]->wait_dequeue(result_ptr);
+            } while (result_ptr->status == httplib::Continue_100);
+            stream_state->received_terminal = true;
+        };
         response.set_header(HEADER_CACHE_CONTROL, "no-cache, no-store, no-transform");
         response.set_header(HEADER_CONNECTION, "close");
-        response.set_chunked_content_provider("text/event-stream", on_chunk);
+        response.set_chunked_content_provider("text/event-stream", on_chunk, on_stream_end);
+        process_tasks->enqueue(std::move(task_ptr));
         return httplib::OK_200;
     }
 
