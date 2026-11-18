@@ -9,6 +9,7 @@
 #define JSON_ASSERT GGML_ASSERT
 #include "llama.cpp/common/log.h"
 #include "llama.cpp/vendor/nlohmann/json.hpp"
+#include "z_utf8_stream.hpp"
 
 // llama-box still uses nlohmann::json for its HTTP compatibility layer.  The
 // upstream common library now exposes its own common_json type instead of a
@@ -278,42 +279,6 @@ static inline std::string encode_base64(const unsigned char * input, size_t leng
     return output;
 }
 
-static inline bool string_is_utf8(const std::string & str) {
-    const auto *          bytes = reinterpret_cast<const unsigned char *>(str.data());
-    const unsigned char * end   = bytes + str.length();
-
-    while (bytes < end) {
-        if (*bytes <= 0x7F) {
-            // 1-byte sequence (0xxxxxxx)
-            bytes++;
-        } else if ((*bytes & 0xE0) == 0xC0) {
-            // 2-byte sequence (110xxxxx 10xxxxxx)
-            if (end - bytes < 2 || (bytes[1] & 0xC0) != 0x80) {
-                return false;
-            }
-            bytes += 2;
-        } else if ((*bytes & 0xF0) == 0xE0) {
-            // 3-byte sequence (1110xxxx 10xxxxxx 10xxxxxx)
-            if (end - bytes < 3 || (bytes[1] & 0xC0) != 0x80 || (bytes[2] & 0xC0) != 0x80) {
-                return false;
-            }
-            bytes += 3;
-        } else if ((*bytes & 0xF8) == 0xF0) {
-            // 4-byte sequence (11110xxx 10xxxxxx 10xxxxxx 10xxxxxx)
-            if (end - bytes < 4 || (bytes[1] & 0xC0) != 0x80 || (bytes[2] & 0xC0) != 0x80 ||
-                (bytes[3] & 0xC0) != 0x80) {
-                return false;
-            }
-            bytes += 4;
-        } else {
-            // Invalid UTF-8 lead byte
-            return false;
-        }
-    }
-
-    return true;
-}
-
 // get_position_of_utf8 returns the last index of character that can form a valid string
 // if the last character is potentially cut in half, return the index before the cut
 // if get_position_of_utf8(text) == text.size(), then the whole text is valid utf8
@@ -536,18 +501,7 @@ static inline std::string random_string() {
 }
 
 static inline std::string tokens_to_output_formatted_string(const llama_context * ctx, const llama_token token) {
-    std::string out = token == LLAMA_TOKEN_NULL ? "" : common_token_to_piece(ctx, token);
-
-    // if the size is 1 and first bit is 1, meaning it's a partial character
-    //   (size > 1 meaning it's already a known token)
-    if (out.size() == 1 && (out[0] & 0x80) == 0x80) {
-        std::stringstream ss;
-        ss << std::hex << (out[0] & 0xff);
-        std::string res(ss.str());
-        out = "byte: \\x" + res;
-    }
-
-    return out;
+    return token == LLAMA_TOKEN_NULL ? "" : utf8_format_token_piece(common_token_to_piece(ctx, token));
 }
 
 struct longest_common_prefix {

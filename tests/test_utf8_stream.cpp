@@ -32,4 +32,20 @@ int main() {
     assert(utf8_stream_chunk_lengths("abc", {1, 4}).empty());
     assert(utf8_stream_chunk_lengths("abc", {2, 1, 3}).empty());
     assert(utf8_stream_chunk_lengths("abc", {1, 2}).empty());
+
+    // Token display strings must be valid JSON even when a BPE token spans
+    // two bytes of a three-byte character. Check both split directions.
+    const std::string character = u8"中";
+    assert(utf8_format_token_piece(character) == character);
+    assert(utf8_format_token_piece(character.substr(0, 1)) == "byte: \\xe4");
+    assert(utf8_format_token_piece(character.substr(0, 2)) == "bytes: \\xe4\\xb8");
+    assert(utf8_format_token_piece(character.substr(1)) == "bytes: \\xb8\\xad");
+    assert(utf8_format_token_piece("a" + character.substr(0, 2)) == "bytes: \\x61\\xe4\\xb8");
+
+    // These sequences have continuation bytes but cannot encode Unicode scalars.
+    assert(!string_is_utf8("\xc0\x80"));
+    assert(!string_is_utf8("\xed\xa0\x80"));
+    assert(!string_is_utf8("\xf4\x90\x80\x80"));
+    const auto piece = utf8_format_token_piece(character.substr(0, 2));
+    assert(nlohmann::json::parse(nlohmann::json{{"token", piece}}.dump()).at("token") == piece);
 }

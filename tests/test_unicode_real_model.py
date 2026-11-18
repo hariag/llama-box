@@ -95,6 +95,25 @@ def main():
                 assert top["bytes"] == [int(top["token"].rsplit("x", 1)[1], 16)], top
             print("PASS byte logprobs", stream, flush=True)
 
+        # Qwen has tokens for the first two bytes of ✅ and last two of 困.
+        # Force those tokens instead of the full scalar or single-byte tokens.
+        splits = [
+            ("✅", {"169286": -100, "36450": 100}, [[0xe2, 0x9c], [0x85]], "bytes: \\xe2\\x9c"),
+            ("困", {"97208": -100, "95752": -100, "153142": 100}, [[0xe5], [0x9b, 0xb0]], "bytes: \\x9b\\xb0"),
+        ]
+        for expected, bias, expected_bytes, expected_token in splits:
+            for stream in [False, True]:
+                text, _, choices = complete(server, expected, stream=stream, chat=True,
+                                            model=args.model, logprobs=True, top_logprobs=1, logit_bias=bias)
+                entries = [entry for choice in choices for entry in
+                           (choice.get("logprobs") or {}).get("content", [])]
+                assert text == expected, (expected, stream, text)
+                assert [entry["bytes"] for entry in entries][:2] == expected_bytes, entries
+                split = next(entry for entry in entries[:2] if len(entry["bytes"]) == 2)
+                assert split["token"] == expected_token, split
+                assert split["top_logprobs"][0]["token"] == expected_token, split
+                print("PASS multi-byte token logprobs", expected, stream, flush=True)
+
 
 if __name__ == "__main__":
     main()
