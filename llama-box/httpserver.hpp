@@ -2471,6 +2471,7 @@ struct completions_task : btask {
                 generated_text = generated_text.substr(generated_text_send.length());
             }
             generated_tool_calls.clear();
+            generated_reasoning_text.clear();
         }
         generated_text_keep_pos = std::string::npos;
 
@@ -5107,7 +5108,8 @@ struct httpserver {
                         }
                         send_text = get_position_of_utf8(task->generated_text) == task->generated_text.size();
                         if (send_text && common_log_get_verbosity_thold() > 5) {
-                            SRV_DBG("rid %s | sampled str: %s\n", rid.c_str(), escape_string(sampled_str).c_str());
+                            SRV_DBG("rid %s | sampled str: %s\n", rid.c_str(),
+                                    escape_string(utf8_format_token_piece(sampled_str)).c_str());
                         }
                         // check stop
                         //// check stop word or tool call
@@ -5126,6 +5128,37 @@ struct httpserver {
                             }
                             // has reasoning
                             if (support_reasoning && !task->reasoning_finished &&
+                                reasoning_start_word == "<|channel>thought") {
+                                if (!task->reasoning_start_found) {
+                                    task->reasoning_start_found = string_starts_with(task->generated_text, reasoning_start_word);
+                                    if (task->reasoning_start_found && !reasoning_in_content) {
+                                        task->generated_text.erase(0, reasoning_start_word.size());
+                                        task->stream_token_offsets.clear();
+                                    } else if (!task->reasoning_start_found) {
+                                        send_text = !string_starts_with(reasoning_start_word, task->generated_text);
+                                        task->reasoning_finished = send_text;
+                                    }
+                                }
+                                if (task->reasoning_start_found) {
+                                    task->n_reasoning++;
+                                    const auto boundary = llama_box_find_gemma4_thought_boundary(
+                                        task->generated_text, params.llm_params.use_jinja && task->tokenized_prompts_include_tools);
+                                    if (boundary.content_start != std::string::npos) {
+                                        if (!reasoning_in_content) {
+                                            task->generated_reasoning_text = task->generated_text.substr(0, boundary.reasoning_end);
+                                            task->generated_text.erase(0, boundary.content_start);
+                                            task->stream_token_offsets.clear();
+                                        }
+                                        task->reasoning_end_found = true;
+                                        task->reasoning_finished = true;
+                                    } else if (task->is_stream() && boundary.reasoning_end < task->generated_text.size()) {
+                                        task->generated_text_keep_pos = std::min(
+                                            task->generated_text_keep_pos, boundary.reasoning_end);
+                                        task->stream_token_offsets.clear();
+                                        send_text = task->generated_text_keep_pos > 0;
+                                    }
+                                }
+                            } else if (support_reasoning && !task->reasoning_finished &&
                                 reasoning_start_token == LLAMA_TOKEN_NULL) {
                                 // find reasoning begin [in word]
                                 if (!task->reasoning_start_found) {
@@ -5252,7 +5285,8 @@ struct httpserver {
                                             task->generated_text_keep_pos = std::string::npos;
                                         }
                                         if (parsed_call || keep < task->generated_text.size()) {
-                                            send_text = keep > 0 || !task->generated_tool_calls.empty();
+                                            send_text = keep > 0 || !task->generated_tool_calls.empty() ||
+                                                !task->generated_reasoning_text.empty();
                                         }
                                     }
                                 }
@@ -5473,7 +5507,7 @@ struct httpserver {
                                 task->generated_text, task->stream_token_offsets);
                             if (partial_stop != std::string::npos) {
                                 if (partial_stop > 0) {
-                                    task->generated_text_keep_pos = partial_stop;
+                                    task->generated_text_keep_pos = std::min(partial_stop, task->generated_text_keep_pos);
                                     json data = task->to_json(llm_ctx, reasoning_in_content);
                                     process_task_results[tid]->enqueue(
                                         std::make_unique<btask_result>(httplib::Continue_100, std::move(data)));

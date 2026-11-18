@@ -37,6 +37,7 @@ def complete(server, expected, *, stream, stop=None, limit=64, chat=False, model
             "samplers": ["temperature"], "grammar": "root ::= " + json.dumps(expected, ensure_ascii=False)}
     if chat:
         body["messages"] = [{"role": "user", "content": "x"}]
+        body["chat_template_kwargs"] = {"enable_thinking": False}
     else:
         body["prompt"] = "x"
     if stop is not None:
@@ -56,7 +57,7 @@ def main():
     args = parser.parse_args()
     server = args.server.rstrip("/")
 
-    for expected in ["✅", "🦙", "🚀", "𠮷", "a✅b🦙c", "中文✅字", "🧑🏽‍💻"]:
+    for expected in ["✅", "🦙", "🚀", "𠮷", "a✅b🦙c", "中文✅字", "字姝字", "🧑🏽‍💻"]:
         for chat in [False, True]:
             for stream in [False, True]:
                 actual, reason, _ = complete(server, expected, stream=stream, chat=chat, model=args.model)
@@ -95,11 +96,12 @@ def main():
                 assert top["bytes"] == [int(top["token"].rsplit("x", 1)[1], 16)], top
             print("PASS byte logprobs", stream, flush=True)
 
-        # Qwen has tokens for the first two bytes of ✅ and last two of 困.
+        # Qwen has split tokens for ✅, 困, and 姝.
         # Force those tokens instead of the full scalar or single-byte tokens.
         splits = [
             ("✅", {"169286": -100, "36450": 100}, [[0xe2, 0x9c], [0x85]], "bytes: \\xe2\\x9c"),
             ("困", {"97208": -100, "95752": -100, "153142": 100}, [[0xe5], [0x9b, 0xb0]], "bytes: \\x9b\\xb0"),
+            ("姝", {"95951": 100}, [[0xe5, 0xa7], [0x9d]], "bytes: \\xe5\\xa7"),
         ]
         for expected, bias, expected_bytes, expected_token in splits:
             for stream in [False, True]:
@@ -111,7 +113,14 @@ def main():
                 assert [entry["bytes"] for entry in entries][:2] == expected_bytes, entries
                 split = next(entry for entry in entries[:2] if len(entry["bytes"]) == 2)
                 assert split["token"] == expected_token, split
-                assert split["top_logprobs"][0]["token"] == expected_token, split
+                # The reported alternatives can include tokens rejected by the grammar.
+                for top in split["top_logprobs"]:
+                    raw = bytes(top["bytes"])
+                    try:
+                        raw.decode("utf-8")
+                    except UnicodeDecodeError:
+                        label = "byte: " if len(raw) == 1 else "bytes: "
+                        assert top["token"] == label + "".join(f"\\x{byte:02x}" for byte in raw), top
                 print("PASS multi-byte token logprobs", expected, stream, flush=True)
 
 

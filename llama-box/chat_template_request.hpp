@@ -143,19 +143,46 @@ static inline llama_box_jinja_tool_call_span llama_box_find_jinja_tool_call(cons
     return span;
 }
 
-// Keep suffixes that may become a tool marker in a later streaming chunk.
-static inline size_t llama_box_jinja_tool_call_partial_start(const std::string & text) {
-    static constexpr std::string_view starts[] = { "<tool_call>", "<function=", "<|tool_call>" };
-    size_t result = text.size();
-    for (const auto start : starts) {
-        const size_t max_prefix = std::min(text.size(), start.size() - 1);
-        for (size_t length = 1; length <= max_prefix; ++length) {
-            if (text.compare(text.size() - length, length, start.data(), length) == 0) {
-                result = std::min(result, text.size() - length);
-            }
+// Keep suffixes that may become a control marker in a later streaming chunk.
+static inline size_t llama_box_partial_marker_start(std::string_view text, std::string_view marker) {
+    for (size_t length = std::min(text.size(), marker.size() - 1); length > 0; --length) {
+        if (text.substr(text.size() - length) == marker.substr(0, length)) {
+            return text.size() - length;
         }
     }
-    return result;
+    return text.size();
+}
+
+static inline size_t llama_box_jinja_tool_call_partial_start(std::string_view text) {
+    return std::min({
+        llama_box_partial_marker_start(text, "<tool_call>"),
+        llama_box_partial_marker_start(text, "<function="),
+        llama_box_partial_marker_start(text, "<|tool_call>"),
+    });
+}
+
+struct llama_box_gemma4_thought_boundary {
+    size_t reasoning_end;
+    size_t content_start;
+};
+
+// An opening tool marker ends an unclosed thought but belongs to the tool parser.
+// A missing content_start means the reasoning may still continue in the next chunk.
+static inline llama_box_gemma4_thought_boundary llama_box_find_gemma4_thought_boundary(
+        std::string_view text, bool tools_enabled) {
+    static constexpr std::string_view thought_end = "<channel|>";
+    static constexpr std::string_view tool_start = "<|tool_call>";
+    const size_t close = text.find(thought_end);
+    const size_t tool = tools_enabled ? text.find(tool_start) : std::string::npos;
+    if (tool < close) {
+        return {tool, tool};
+    }
+    if (close != std::string::npos) {
+        return {close, close + thought_end.size()};
+    }
+    const size_t partial_close = llama_box_partial_marker_start(text, thought_end);
+    const size_t partial_tool = tools_enabled ? llama_box_partial_marker_start(text, tool_start) : text.size();
+    return {std::min(partial_close, partial_tool), std::string::npos};
 }
 
 // A chat template may put the opening reasoning tag in the generation prompt.

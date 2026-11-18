@@ -163,6 +163,25 @@ static void test_jinja_tool_call_spans_preserve_following_calls() {
     assert(gemma.substr(gemma_span.end) == " tail");
 }
 
+static void test_gemma4_tool_call_ends_unclosed_thought() {
+    const std::string thought = "Checking the weather";
+    const std::string tool = "<|tool_call>";
+    for (size_t n = 1; n < tool.size(); ++n) {
+        const auto partial = llama_box_find_gemma4_thought_boundary(thought + tool.substr(0, n), true);
+        assert(partial.reasoning_end == thought.size());
+        assert(partial.content_start == std::string::npos);
+    }
+    const auto unclosed = llama_box_find_gemma4_thought_boundary(thought + tool, true);
+    assert(unclosed.reasoning_end == thought.size());
+    assert(unclosed.content_start == thought.size());
+    const auto closed = llama_box_find_gemma4_thought_boundary(thought + "<channel|>" + tool, true);
+    assert(closed.reasoning_end == thought.size());
+    assert(closed.content_start == thought.size() + std::string_view("<channel|>").size());
+    const auto disabled = llama_box_find_gemma4_thought_boundary(thought + tool, false);
+    assert(disabled.reasoning_end == thought.size() + tool.size());
+    assert(disabled.content_start == std::string::npos);
+}
+
 static void test_jinja_tool_call_partial_markers_are_buffered() {
     for (const std::string marker : { "<tool_call>", "<function=", "<|tool_call>" }) {
         for (size_t split = 1; split < marker.size(); ++split) {
@@ -229,6 +248,7 @@ int main() {
     test_invalid_message_reasoning_content_is_rejected();
     test_jinja_tool_call_requires_a_closed_envelope_before_stop();
     test_jinja_tool_call_spans_preserve_following_calls();
+    test_gemma4_tool_call_ends_unclosed_thought();
     test_jinja_tool_call_partial_markers_are_buffered();
     test_prefilled_reasoning_prompt_state();
     test_reasoning_transition_suppresses_only_delimiter_whitespace();

@@ -18,7 +18,18 @@ The fork adds ggml operations and uses 160-byte tensor names. Its RPC protocol
 uses fork-specific major version 11, and the patch field identifies the tensor
 name size. Clients reject mismatched protocol versions and name sizes. Upgrade
 all llama-box RPC workers and the main server together.
-The pinned stable-diffusion.cpp remains `e29085a5cdf6365dee4cbacddf4d889b104bb498`.
+
+The November 18 model sync backports the following changes without replacing
+the fork's ggml or multimodal APIs:
+
+- llama.cpp: Gemma 4 tool calls from an unclosed thought (#32232),
+  Qwen3.5 combined tensor conversion and Decider metadata (#32102, #32156),
+  Qwen3-Next output scale and Qwen-VL tensor and projector metadata
+  (#32393, #32241, #32349, #32130), and Qwen4Exp FP8 conversion and graph reuse
+  (#32476, #32483).
+- stable-diffusion.cpp: Qwen Image 2.1 flow schedule (#2048), fused MLP LoRA
+  mapping (#2057), and VAE FP16 scaling adapted to the fork's existing 3D
+  convolution and singleton temporal weight handling (#2054).
 
 Some historical patches in `llama-box/patches` are already applied in the
 fork; an apply warning by itself does not mean a change is missing. Check both
