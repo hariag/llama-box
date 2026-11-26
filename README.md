@@ -548,6 +548,8 @@ server/completion:
          --reasoning-in-content   Return reasoning result into content field (default: false)
          --no-reasoning-in-content
                                   Disable return reasoning result into content field
+         --reasoning-stream-compat
+                                  Close streamed reasoning for clients that require a content delta
 
 server/completion/speculative:
 
@@ -756,6 +758,9 @@ The available endpoints for the LLaMA Box server mode are:
     + `reasoning_effort` is forwarded to the Jinja template for model-specific modes such as `xhigh`, `medium`, and
       `low`; `none` disables thinking for the request. With streaming enabled, `stream_options.include_usage` adds
       usage information to the final chunk.
+    + For clients that close their reasoning display on the first nonempty `content` delta, combine
+      `--no-reasoning-in-content` with `--reasoning-stream-compat`. If thinking leads directly to a tool call or
+      the end of a stream, the server sends a separate newline delta to close the display.
 
 - **POST** `/v1/embeddings`: (OpenAI-compatible) Returns the embeddings of the given prompt,
   see https://platform.openai.com/docs/api-reference/embeddings/create.

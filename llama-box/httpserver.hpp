@@ -67,6 +67,7 @@ struct httpserver_params {
 
     bool    cache_prompt        = true;
     bool    endpoint_images     = false;
+    bool    reasoning_stream_compat = false;
     int32_t conn_idle           = 60;  // connection idle in seconds
     int32_t conn_keepalive      = 15;  // connection keep-alive in seconds
     int32_t n_tps               = 0;   // maximum number of tokens per seconds
@@ -997,13 +998,22 @@ static inline std::unique_ptr<chat_complete_req> get_chat_complete_req(
     ptr->model = json_value(req, "model", common_model_alias_value(params));
 
     {
-        json messages = req.at("messages");
+        const json & messages = req.at("messages");
         for (const json & msg : messages) {
-            std::string role = json_value(msg, "role", std::string());
-            std::string reasoning_content = llama_box_parse_message_reasoning_content(msg);
-            std::string content;
+            common_chat_msg chat_msg;
+            chat_msg.role = json_value(msg, "role", std::string());
+            chat_msg.reasoning_content = llama_box_parse_message_reasoning_content(msg);
+            chat_msg.tool_name = json_value(msg, "name", std::string());
+            chat_msg.tool_call_id = json_value(msg, "tool_call_id", std::string());
+            const bool has_content = msg.contains("content") && !msg.at("content").is_null();
+            const bool has_tool_calls = msg.contains("tool_calls") && !msg.at("tool_calls").is_null();
+            if (!has_content && !has_tool_calls) {
+                throw std::invalid_argument("Illegal param: missing 'content' or 'tool_calls' in \"messages\" item");
+            }
+
             // content
-            if (msg.contains("content") && !msg.at("content").is_null()) {
+            if (has_content) {
+                std::string & content = chat_msg.content;
                 // string content
                 if (msg.at("content").is_string()) {
                     content = msg.at("content").get<std::string>();
@@ -1146,46 +1156,39 @@ static inline std::unique_ptr<chat_complete_req> get_chat_complete_req(
                 else {
                     throw std::invalid_argument("Illegal param: invalid \"content\"");
                 }
-                ptr->messages.push_back({ role, content, {}, {}, reasoning_content, "", "" });
             }
-            // tool_calls
-            else if (msg.contains("tool_calls") && !msg.at("tool_calls").is_null()) {
-                // array tool_calls
-                if (msg.at("tool_calls").is_array()) {
-                    std::vector<common_chat_tool_call> chat_tcs;
-                    for (const json & part : msg.at("tool_calls")) {
-                        common_chat_tool_call chat_tc;
-                        if (!part.contains("type") || part.at("type") != "function") {
-                            continue;
-                        }
-                        if (!part.contains("function") || !part.at("function").is_object()) {
-                            continue;
-                        }
-                        const json & func = part.at("function");
-                        if (!func.contains("name") || !func.at("name").is_string()) {
-                            continue;
-                        }
-                        if (!func.contains("arguments") || !func.at("arguments").is_string()) {
-                            continue;
-                        }
-                        chat_tc.name      = func.at("name").get<std::string>();
-                        chat_tc.arguments = func.at("arguments").get<std::string>();
-                        if (func.contains("id")) {
-                            chat_tc.id = func.at("id").get<std::string>();
-                        }
-                        chat_tcs.push_back(chat_tc);
-                    }
-                    ptr->messages.push_back({ role, "", {}, chat_tcs, reasoning_content, "", "" });
-                }
-                // illegal
-                else {
+
+            if (has_tool_calls) {
+                const json & tool_calls = msg.at("tool_calls");
+                if (!tool_calls.is_array()) {
                     throw std::invalid_argument("Illegal param: invalid \"tool_calls\"");
                 }
+                for (const json & part : tool_calls) {
+                    if (!part.contains("type") || part.at("type") != "function") {
+                        continue;
+                    }
+                    if (!part.contains("function") || !part.at("function").is_object()) {
+                        continue;
+                    }
+                    const json & func = part.at("function");
+                    if (!func.contains("name") || !func.at("name").is_string()) {
+                        continue;
+                    }
+                    if (!func.contains("arguments") || !func.at("arguments").is_string()) {
+                        continue;
+                    }
+                    common_chat_tool_call chat_tc;
+                    chat_tc.name = func.at("name").get<std::string>();
+                    chat_tc.arguments = func.at("arguments").get<std::string>();
+                    chat_tc.id = json_value(part, "id", std::string());
+                    if (chat_tc.id.empty()) {
+                        // Preserve support for the previously accepted nested ID.
+                        chat_tc.id = json_value(func, "id", std::string());
+                    }
+                    chat_msg.tool_calls.push_back(std::move(chat_tc));
+                }
             }
-            // illegal
-            else {
-                throw std::invalid_argument("Illegal param: missing 'content' or 'tool_calls' in \"messages\" item");
-            }
+            ptr->messages.push_back(std::move(chat_msg));
         }
     }
 
@@ -2239,6 +2242,7 @@ struct completions_task : btask {
     bool                    reasoning_start_found = false;
     bool                    reasoning_end_found   = false;
     bool                    reasoning_finished    = false;
+    llama_token             reasoning_tool_call_token = LLAMA_TOKEN_NULL;
     llama_box_reasoning_transition_filter reasoning_transition_filter;
     //// tool call
     bool                    tool_call_stop_fast   = false;  // collect from request
@@ -5032,9 +5036,10 @@ struct httpserver {
                                 break;
                             }
                             // accept special token
-                            bool        special =
-                                params.llm_params.special || task->req->sampling.preserved_tokens.find(tok) !=
-                                                                 task->req->sampling.preserved_tokens.end();
+                            const bool tool_call_opener = tok == task->reasoning_tool_call_token;
+                            const bool special =
+                                tool_call_opener || params.llm_params.special ||
+                                task->req->sampling.preserved_tokens.find(tok) != task->req->sampling.preserved_tokens.end();
                             // has reasoning
                             if (support_reasoning && !task->reasoning_finished) {
                                 // find reasoning begin [in token]
@@ -5055,7 +5060,17 @@ struct httpserver {
                                 }
                                 // find reasoning end [in token]
                                 else if (!task->reasoning_end_found) {
-                                    if (reasoning_end_token != LLAMA_TOKEN_NULL) {
+                                    if (tool_call_opener) {
+                                        // The opener ends Qwen reasoning and still belongs to the tool call.
+                                        // Preserve unsent reasoning when the same batch also carries the call.
+                                        if (!reasoning_in_content) {
+                                            task->generated_reasoning_text.swap(task->generated_text);
+                                            task->stream_token_offsets.clear();
+                                            sampled_str.clear();
+                                        }
+                                        task->reasoning_end_found = true;
+                                        task->reasoning_finished = true;
+                                    } else if (reasoning_end_token != LLAMA_TOKEN_NULL) {
                                         task->n_reasoning++;
                                         task->reasoning_end_found = tok == reasoning_end_token;
                                         if (task->reasoning_end_found) {
@@ -5935,7 +5950,7 @@ struct httpserver {
         // streaming
         auto stream_state = std::make_shared<btask_stream_state>();
         task_ptr->stream_state = stream_state;
-        const auto on_chunk = [=](size_t, httplib::DataSink & sink) {
+        const auto on_chunk = [=, reasoning_compat = llama_box_reasoning_stream_compat{}](size_t, httplib::DataSink & sink) mutable {
             // dequeue result
             std::unique_ptr<btask_result> result_ptr;
             process_task_results[tid]->wait_dequeue(result_ptr);
@@ -5947,6 +5962,13 @@ struct httpserver {
             // output result
             //// completions or embeddings
             if (ttype != TASK_IMAGES) {
+                if (rtype == REQ_CHAT_COMPLETE && params.reasoning_stream_compat) {
+                    for (auto & event : reasoning_compat.before_chunk(result_ptr->result, stream_state->received_terminal)) {
+                        if (send_event_json(sink, httplib::Continue_100, event) != httplib::OK_200) {
+                            return false;
+                        }
+                    }
+                }
                 int32_t status = send_event_json(sink, result_ptr->status, result_ptr->result,
                                                  result_ptr->status != httplib::Continue_100);
                 if (status != httplib::OK_200) {
@@ -7064,7 +7086,8 @@ struct httpserver {
         }
 
         bool tool_call_stop_fast = !(support_parallel_tool_calls && req->parallel_tool_calls) ||
-                                   req->tool_choice == COMMON_CHAT_TOOL_CHOICE_REQUIRED || req->tools.size() <= 1;
+                                   req->tool_choice == COMMON_CHAT_TOOL_CHOICE_REQUIRED ||
+                                   (!params.llm_params.use_jinja && req->tools.size() <= 1);
 
         // Required Jinja tool calls must still pass through the model's
         // reasoning parser.  Qwen3.8 emits </think> before its XML tool call;
@@ -7097,6 +7120,15 @@ struct httpserver {
                 req->chat_params.generation_prompt,
                 req->chat_params.thinking_start_tag,
                 reasoning_end_tag);
+            const auto & end_tags = req->chat_params.thinking_end_tags;
+            if (params.llm_params.use_jinja && tokenized_prompts_include_tools &&
+                req->tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE && reasoning_start_token != LLAMA_TOKEN_NULL &&
+                std::find(end_tags.begin(), end_tags.end(), "<tool_call>") != end_tags.end()) {
+                const auto ids = common_tokenize(llm_vocab, "<tool_call>", false, true);
+                if (ids.size() == 1 && common_token_to_piece(llm_vocab, ids.front(), true) == "<tool_call>") {
+                    task->reasoning_tool_call_token = ids.front();
+                }
+            }
         }
         task->req                                   = std::move(req);
         task->t_start_prefill                       = ggml_time_us();

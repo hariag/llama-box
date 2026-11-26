@@ -7,6 +7,8 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 #include "nlohmann/json.hpp"
 
@@ -22,6 +24,53 @@ static inline bool llama_box_tool_matches_choice(
         const std::string & tool_name, const std::string & selected_name) {
     return selected_name.empty() || tool_name == selected_name;
 }
+
+// Older OpenAI-compatible clients close their reasoning display only when they
+// receive a nonempty content delta. Keep that signal separate from reasoning,
+// tools, and the terminal chunk so those clients can consume every field.
+struct llama_box_reasoning_stream_compat {
+    bool reasoning_open = false;
+
+    std::vector<nlohmann::json> before_chunk(nlohmann::json & chunk, bool terminal) {
+        using json = nlohmann::json;
+        std::vector<json> preceding;
+        if (!chunk.contains("choices") || chunk.at("choices").empty()) {
+            return preceding;
+        }
+        json & choice = chunk.at("choices").at(0);
+        json & delta = choice.at("delta");
+        const auto is_nonempty_string = [&delta](const char * key) {
+            const auto value = delta.find(key);
+            return value != delta.end() && value->is_string() && !value->get_ref<const std::string &>().empty();
+        };
+        const bool has_reasoning = is_nonempty_string("reasoning_content");
+        const bool has_content = is_nonempty_string("content");
+        const bool has_tools = delta.contains("tool_calls") && !delta.at("tool_calls").empty();
+        const bool transition = has_content || has_tools || terminal;
+        const auto make_chunk = [&](json message) {
+            return json{
+                {"id", chunk.at("id")}, {"object", chunk.at("object")}, {"created", chunk.at("created")},
+                {"model", chunk.at("model")}, {"usage", nullptr},
+                {"choices", json::array({{{"index", choice.at("index")}, {"finish_reason", nullptr},
+                                          {"delta", std::move(message)}}})},
+            };
+        };
+        if (has_reasoning) {
+            reasoning_open = true;
+            if (transition) {
+                preceding.push_back(make_chunk({{"reasoning_content", std::move(delta.at("reasoning_content"))}}));
+                delta.erase("reasoning_content");
+            }
+        }
+        if (reasoning_open && transition) {
+            if (!has_content) {
+                preceding.push_back(make_chunk({{"content", "\n"}}));
+            }
+            reasoning_open = false;
+        }
+        return preceding;
+    }
+};
 
 // Upstream's chat parser consumes the whitespace separating a reasoning block
 // from the final answer.  The server's token-level streaming path needs the

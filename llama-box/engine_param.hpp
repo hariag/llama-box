@@ -420,6 +420,7 @@ static void llama_box_params_print_usage(int, char ** argv, const llama_box_para
     opts.push_back({ "server/completion",                  "       --no-enable-reasoning",                  "Disable reasoning" });
     opts.push_back({ "server/completion",                  "       --reasoning-in-content",                 "Return reasoning result into content field (default: %s)", llm_params.reasoning_format != COMMON_REASONING_FORMAT_AUTO ? "true" : "false" });
     opts.push_back({ "server/completion",                  "       --no-reasoning-in-content",              "Disable return reasoning result into content field" });
+    opts.push_back({ "server/completion",                  "       --reasoning-stream-compat",              "Close streamed reasoning for clients that require a content delta" });
     // server // completion //
     // server // completion // speculative //
     opts.push_back({ "server/completion/speculative" });
@@ -1826,6 +1827,11 @@ static bool llama_box_params_parse(int argc, char ** argv, llama_box_params & pa
 
             if (!strcmp(flag, "--no-reasoning-in-content")) {
                 params_.hs_params.llm_params.reasoning_format = COMMON_REASONING_FORMAT_AUTO;
+                continue;
+            }
+
+            if (!strcmp(flag, "--reasoning-stream-compat")) {
+                params_.hs_params.reasoning_stream_compat = true;
                 continue;
             }
 

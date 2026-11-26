@@ -236,6 +236,59 @@ static void test_specific_tool_choice_keeps_the_selected_tool() {
     assert(llama_box_tool_matches_choice("get_time", ""));
 }
 
+static nlohmann::json chat_chunk(nlohmann::json delta, const nlohmann::json & finish = nullptr) {
+    using json = nlohmann::json;
+    return {
+        {"id", "chatcmpl-test"}, {"object", "chat.completion.chunk"}, {"created", 0}, {"model", "test"},
+        {"usage", nullptr},
+        {"choices", json::array({{{"index", 0}, {"delta", std::move(delta)}, {"finish_reason", finish}}})},
+    };
+}
+
+static void test_reasoning_stream_compat_closes_before_tools_or_finish() {
+    using json = nlohmann::json;
+    for (size_t count : {0, 1, 2}) {
+        llama_box_reasoning_stream_compat compat;
+        auto reasoning = chat_chunk({{"reasoning_content", "Thought"}});
+        assert(compat.before_chunk(reasoning, false).empty());
+        auto empty = chat_chunk({{"content", ""}, {"reasoning_content", ""}});
+        assert(compat.before_chunk(empty, false).empty());
+
+        auto tool_calls = json::array();
+        for (size_t i = 0; i < count; ++i) {
+            tool_calls.push_back({{"index", i}});
+        }
+        auto end = chat_chunk({{"tool_calls", tool_calls}}, count == 0 ? "length" : "tool_calls");
+        auto preceding = compat.before_chunk(end, true);
+        assert(preceding.size() == 1);
+        const auto & closure = preceding[0].at("choices").at(0);
+        assert(closure.at("delta") == (json{{"content", "\n"}}));
+        assert(closure.at("finish_reason").is_null() && preceding[0].at("usage").is_null());
+        assert(end.at("choices").at(0).at("delta").at("tool_calls") == tool_calls);
+        assert(compat.before_chunk(end, true).empty());
+    }
+}
+
+static void test_reasoning_stream_compat_preserves_combined_chunk() {
+    using json = nlohmann::json;
+    for (const std::string & content : {std::string("Answer"), std::string()}) {
+        llama_box_reasoning_stream_compat compat;
+        auto calls = json::array({{{"index", 0}}});
+        auto combined = chat_chunk({{"reasoning_content", "Thought"}, {"content", content}, {"tool_calls", calls}}, "tool_calls");
+        auto preceding = compat.before_chunk(combined, true);
+        assert(preceding.size() == (content.empty() ? 2 : 1));
+        assert(preceding[0].at("choices").at(0).at("delta") == (json{{"reasoning_content", "Thought"}}));
+        assert(combined.at("choices").at(0).at("delta") == (json{{"content", content}, {"tool_calls", calls}}));
+    }
+    llama_box_reasoning_stream_compat compat;
+    auto reasoning = chat_chunk({{"reasoning_content", "Thought"}});
+    assert(compat.before_chunk(reasoning, false).empty());
+    auto answer = chat_chunk({{"content", "Answer"}});
+    assert(compat.before_chunk(answer, false).empty());
+    auto done = chat_chunk({{"content", ""}}, "stop");
+    assert(compat.before_chunk(done, true).empty());
+}
+
 int main() {
     test_request_kwargs_override_defaults();
     test_reasoning_effort_none_disables_thinking();
@@ -254,5 +307,7 @@ int main() {
     test_reasoning_transition_suppresses_only_delimiter_whitespace();
     test_reasoning_transition_defers_same_batch_content();
     test_specific_tool_choice_keeps_the_selected_tool();
+    test_reasoning_stream_compat_closes_before_tools_or_finish();
+    test_reasoning_stream_compat_preserves_combined_chunk();
     return 0;
 }
