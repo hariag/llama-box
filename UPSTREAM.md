@@ -31,6 +31,34 @@ the fork's ggml or multimodal APIs:
   mapping (#2057), and VAE FP16 scaling adapted to the fork's existing 3D
   convolution and singleton temporal weight handling (#2054).
 
+The November 27 sync uses ggml-org/llama.cpp `a07831a008` and the Unsloth
+inference fork as review sources.
+
+- Gemma 4 E2B and E4B with shared KV layers prune unneeded query rows during
+  prefill in a multi-slot context. [llama.cpp #32342](https://github.com/ggml-org/llama.cpp/pull/32342)
+- KV sequence removal looks up the sequence's positions instead of scanning
+  every cell. [llama.cpp #32380](https://github.com/ggml-org/llama.cpp/pull/32380)
+- CUDA fuses RMS normalization, weight multiplication, and MROPE/IMROPE,
+  including partial rotation in Qwen. CUDA also checks Q/K strides before
+  accepting a Gated Delta Net operation. [llama.cpp #32500](https://github.com/ggml-org/llama.cpp/pull/32500), [llama.cpp #32660](https://github.com/ggml-org/llama.cpp/pull/32660)
+- Unsloth indexes sampling penalties by token ID when candidates are in
+  full vocabulary order. Reordered and filtered candidates use the existing
+  path. [Unsloth #95](https://github.com/unslothai/llama.cpp/pull/95)
+
+The CUDA build was tested on RTX 3090 with driver 580.173.02 and CUDA 13.0
+Update 1. With Gemma 4 E2B Q4_0, four concurrent HTTP requests of about 2,056
+prompt tokens each, a 16K context, batch 2048, microbatch 512 and prompt
+caching disabled, median aggregate prompt throughput rose from 7,180 to
+9,886 tok/s with split KV and from 7,364 to 10,147 tok/s with unified KV.
+Each result is the median of three request batches. Reserved KV buffers
+were unchanged in each mode. The unified CUDA compute buffer rose from
+566.31 to 581.82 MiB. All 436 CUDA RMSNorm/RoPE cases passed, and Qwen3.8-27B
+completed streaming and non-streaming chat with MTP predictions accepted.
+
+The Qwen recurrent replay update changes runtime state and several backends.
+The Unsloth quantized-KV updates depend on a different CUDA attention layout.
+Both remain separate from this sync. [llama.cpp #31669](https://github.com/ggml-org/llama.cpp/pull/31669), [Unsloth #303](https://github.com/unslothai/llama.cpp/pull/303)
+
 Some historical patches in `llama-box/patches` are already applied in the
 fork; an apply warning by itself does not mean a change is missing. Check both
 the fork contents and the relevant build configuration before changing them.
