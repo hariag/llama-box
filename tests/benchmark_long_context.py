@@ -72,6 +72,7 @@ def fixtures(args):
     return {
         "cold": prompt,
         "exact": prompt,
+        "exact_warm_repeat": prompt,
         "append": appended,
         "return_to_original": prompt,
         "diverge": divergent,
@@ -147,7 +148,7 @@ def completion(args, prompt, output_tokens):
     }
 
 
-def verify(args, case, row, expected, original_hash, reference):
+def verify(args, case, row, expected, original_hash, warm_hash, reference):
     errors = []
     cached = row["cached_tokens"]
     lcp = row["previous_lcp_tokens"]
@@ -158,13 +159,19 @@ def verify(args, case, row, expected, original_hash, reference):
     if not isinstance(cached, int) or not 0 <= cached <= lcp:
         errors.append("reported cache reuse exceeds the verified prefix")
     elif args.expect_cache:
-        if (case in ("exact", "append", "return_to_original") or
+        if (case in ("exact", "exact_warm_repeat", "append", "return_to_original") or
             (case == "diverge" and args.diverge_tokens == 1)) and cached < lcp - 1:
             errors.append("near-complete prefix reuse is missing")
         if case == "truncate" and cached < max(1, min(lcp, args.input_tokens) - 129):
             errors.append("truncation missed the retained checkpoint near the original prompt tail")
-    if case in ("exact", "return_to_original") and row["output_sha256"] != original_hash:
-        errors.append("cached output for the original prompt differs from cold output")
+    if case in ("exact", "exact_warm_repeat", "return_to_original"):
+        row["matches_cold_output"] = row["output_sha256"] == original_hash
+        if not row["matches_cold_output"] and not args.report_cold_drift:
+            errors.append("cached output for the original prompt differs from cold output")
+    if case == "exact_warm_repeat":
+        row["matches_warm_output"] = row["output_sha256"] == warm_hash
+        if not row["matches_warm_output"]:
+            errors.append("repeated warm requests produced different outputs")
     if args.require_mtp and not row["draft_tokens"]:
         errors.append("MTP submitted no speculative tokens")
     if row["unicode_replacements"]:
@@ -216,6 +223,7 @@ def workload(args):
     completion(args, warmup, 8)
     previous = warmup
     cold_hash = None
+    warm_hash = None
     failures = []
     samples = [mem_available_mib()]
     done = threading.Event()
@@ -228,10 +236,12 @@ def workload(args):
             row["previous_lcp_tokens"] = shared_prefix(previous, prompt)
             if isinstance(row["cached_tokens"], int):
                 row["uncached_prompt_tokens"] = row["prompt_tokens"] - row["cached_tokens"]
-            errors = verify(args, case, row, prompt, cold_hash, reference)
+            errors = verify(args, case, row, prompt, cold_hash, warm_hash, reference)
             emit("request", case=case, **row, errors=errors)
             if case == "cold":
                 cold_hash = row["output_sha256"]
+            if case == "exact":
+                warm_hash = row["output_sha256"]
             failures.extend(f"{case} {error}" for error in errors)
             previous = prompt
     finally:
@@ -259,6 +269,8 @@ def main():
     parser.add_argument("--expect-cache", action="store_true")
     parser.add_argument("--require-mtp", action="store_true")
     parser.add_argument("--capture-output", action="store_true", help="retain synthetic output for diagnostics")
+    parser.add_argument("--report-cold-drift", action="store_true",
+                        help="report cold versus cached hashes separately when CUDA prefill shapes differ")
     parser.add_argument("--reference-jsonl", type=Path)
     parser.add_argument("--min-mem-available-mib", type=int, default=0)
     parser.add_argument("--timeout", type=float, default=900)

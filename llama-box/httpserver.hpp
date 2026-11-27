@@ -3854,14 +3854,29 @@ struct httpserver {
             std::make_unique<btask_result>(httplib::RequestTimeout_408, std::move(data)));
     }
 
+    inline bool trim_completion_sequence(int32_t seq_id, llama_pos pos) {
+        const bool tgt_ok = llama_memory_seq_rm(llama_get_memory(llm_ctx), seq_id, pos, -1);
+        const bool dft_ok = !llm_ctx_draft || llama_memory_seq_rm(llama_get_memory(llm_ctx_draft), seq_id, pos, -1);
+        return tgt_ok && dft_ok;
+    }
+
     inline bool clear_completion_sequence(int32_t seq_id) {
-        const bool tgt_ok = llama_memory_seq_rm(llama_get_memory(llm_ctx), seq_id, 0, -1);
-        const bool dft_ok = !llm_ctx_draft || llama_memory_seq_rm(llama_get_memory(llm_ctx_draft), seq_id, 0, -1);
-        if (hybrid_prompt_cache && !(tgt_ok && dft_ok)) {
+        const bool ok = trim_completion_sequence(seq_id, 0);
+        if (hybrid_prompt_cache && !ok) {
             hybrid_cache_unhealthy = true;
             SRV_ERR("failed to clear hybrid sequence %d; refusing further completions\n", seq_id);
         }
-        return tgt_ok && dft_ok;
+        return ok;
+    }
+
+    bool prompt_swa_window_covers(int32_t seq_id, llama_pos pos, bool trimmed) const {
+        // The SWA cache keeps an unbroken interval of positions for each sequence.
+        // The next token needs its preceding n_swa - 1 positions.
+        const auto mem = llama_get_memory(llm_ctx);
+        const llama_pos pos_min = llama_memory_seq_pos_min(mem, seq_id);
+        const llama_pos pos_max = llama_memory_seq_pos_max(mem, seq_id);
+        return pos_min >= 0 && pos_min <= std::max(0, pos - llm_model_n_swa + 1) &&
+               (trimmed ? pos_max == pos - 1 : pos_max >= pos - 1);
     }
 
     // A failed speculative rollback invalidates this slot.  Never return it to
@@ -4480,6 +4495,7 @@ struct httpserver {
                                 }
                             }
                             seq_id = seq_lcp_id;
+                            bool kept_live_swa_window = false;
                             // miss cache
                             if (seq_lcp_l == 0) {
                                 SRV_INFV(2,
@@ -4493,12 +4509,24 @@ struct httpserver {
                                 llama_pos pos    = std::min(seq_lcp_pos - 1, cached);
                                 if (selected_checkpoint) {
                                     const auto & checkpoint = *selected_checkpoint;
-                                    const auto flags = LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY;
-                                    bool ok = llama_state_seq_set_data_ext(llm_ctx, checkpoint.target.data(), checkpoint.target.size(),
+                                    bool ok = true;
+                                    if (llm_model_n_swa > 0 && prompt_swa_window_covers(seq_id, cached, false)) {
+                                        // Preserve the physical layout of rows still present in this Gemma slot.
+                                        ok = trim_completion_sequence(seq_id, cached);
+                                        kept_live_swa_window = ok && prompt_swa_window_covers(seq_id, cached, true);
+                                        if (kept_live_swa_window) {
+                                            SRV_INFV(2, "rid %s | reused live SWA window, seq = %d, next_pos = %d\n",
+                                                     rid.c_str(), seq_id, cached);
+                                        }
+                                    }
+                                    if (ok && !kept_live_swa_window) {
+                                        const auto flags = LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY;
+                                        ok = llama_state_seq_set_data_ext(llm_ctx, checkpoint.target.data(), checkpoint.target.size(),
                                                                           seq_id, flags) == checkpoint.target.size();
-                                    if (ok && llm_ctx_draft) {
-                                        ok = llama_state_seq_set_data_ext(llm_ctx_draft, checkpoint.draft.data(), checkpoint.draft.size(),
-                                                                          seq_id, flags) == checkpoint.draft.size();
+                                        if (ok && llm_ctx_draft) {
+                                            ok = llama_state_seq_set_data_ext(llm_ctx_draft, checkpoint.draft.data(), checkpoint.draft.size(),
+                                                                              seq_id, flags) == checkpoint.draft.size();
+                                        }
                                     }
                                     if (ok && spec) {
                                         common_speculative_set_state(spec.get(), seq_id, checkpoint.speculative);
@@ -4511,17 +4539,10 @@ struct httpserver {
                                     cached = 0;
                                     pos    = 0;
                                 }
-                                else if (llm_model_n_swa > 0 && hybrid_prompt_cache && pos > 0) {
-                                    // The next token needs the preceding n_swa - 1 positions.
-                                    // The saved SWA rows are contiguous because the checkpoint was taken during prefill.
-                                    const auto mem = llama_get_memory(llm_ctx);
-                                    const llama_pos pos_min = llama_memory_seq_pos_min(mem, seq_id);
-                                    const llama_pos pos_max = llama_memory_seq_pos_max(mem, seq_id);
-                                    if (pos_min < 0 || pos_min > std::max(0, pos - llm_model_n_swa + 1) ||
-                                        pos_max != pos - 1) {
-                                        cached = 0;
-                                        pos    = 0;
-                                    }
+                                else if (llm_model_n_swa > 0 && hybrid_prompt_cache && pos > 0 &&
+                                         !prompt_swa_window_covers(seq_id, pos, true)) {
+                                    cached = 0;
+                                    pos    = 0;
                                 }
                                 // check whether the requested content is hitting the range discarded by SWA.
                                 else if (llm_model_n_swa > 0 && !hybrid_prompt_cache && seq_lcp_pos > int32_t(seq_lcp_l)) {
@@ -4557,10 +4578,8 @@ struct httpserver {
                             cache.pos_discard = task->pos > 0 ? cache.pos_discard : 0;
                             task->set_seq_id(seq_id);
                             // clean kv cache
-                            bool cache_trim_ok = llama_memory_seq_rm(llama_get_memory(llm_ctx), seq_id, task->pos, -1);
-                            if (llm_ctx_draft != nullptr) {
-                                cache_trim_ok = llama_memory_seq_rm(llama_get_memory(llm_ctx_draft), seq_id, task->pos, -1) && cache_trim_ok;
-                            }
+                            const bool cache_trim_ok = (kept_live_swa_window && task->pos > 0) ||
+                                trim_completion_sequence(seq_id, task->pos);
                             if (!cache_trim_ok) {
                                 // Neither target nor draft may retain a partially
                                 // trimmed prefix when one side failed. Fall back to
