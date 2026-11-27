@@ -520,6 +520,11 @@ jobs:
             distro_container_image: 'llama-box-ci/cuda-rockylinux8:12.4'
             cuda_arch: '60-real;61-real;70-real;75-real;80-real;86-real;87-real;89-real;90-real'
             install_build_deps: '0'
+          - arch: 'arm64'
+            version: '13.0'
+            distro_container_image: 'nvidia/cuda:13.0.3-devel-ubuntu22.04'
+            cuda_arch: '121a-real' # NVIDIA DGX Spark (GB10)
+            install_build_deps: '1'
     runs-on: ${{ matrix.arch == 'amd64' && 'ubuntu-22.04' || 'ubuntu-22.04-arm' }}
     steps:
       - name: Maximize Root Space
