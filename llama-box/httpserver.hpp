@@ -3156,11 +3156,15 @@ struct httpserver {
             return true;
         }
 
-        // prompt cache
-        // Hybrid checkpoints reuse stable prefix positions without shifting KV cells.
-        hybrid_prompt_cache = !llm_kv_cache_shift && llm_model_arch_name == "qwen35" &&
-                              llm_model_n_swa == 0 && !params.llm_params.embedding &&
-                              (!llm_ctx_draft || mtp_enabled);
+        // Fixed-position checkpoints preserve recurrent state or the compact SWA
+        // window while reusing dense KV rows at their original positions.
+        const bool recurrent_prompt_cache = llm_model_arch_name == "qwen35" && llm_model_n_swa == 0 &&
+                                            (!llm_ctx_draft || mtp_enabled);
+        const bool compact_swa_prompt_cache = llm_model_arch_name == "gemma4" && llm_model_n_swa > 0 &&
+                                              llm_model_casual &&
+                                              (!llm_ctx_draft || (mtp_enabled && llama_get_ctx_other(llm_ctx_draft) == llm_ctx));
+        hybrid_prompt_cache = !llm_kv_cache_shift && !params.llm_params.embedding &&
+                              (recurrent_prompt_cache || compact_swa_prompt_cache);
         cache_prompt = params.cache_prompt && (llm_kv_cache_shift || hybrid_prompt_cache) &&
                        llama_get_memory(llm_ctx) != nullptr;
         if (cache_prompt) {
@@ -3619,20 +3623,33 @@ struct httpserver {
 
     // model addition
 
+    struct prompt_checkpoint {
+        llama_pos pos = 0;  // Prefix length, also the next position to evaluate.
+        std::vector<uint8_t> target, draft, speculative;
+
+        size_t size() const {
+            return target.size() + draft.size() + speculative.size();
+        }
+    };
+
     struct cache_prompt_entry {
         llama_tokens tokens;
         bool         used        = false;
         llama_pos    pos         = 0;  // position
         llama_pos    pos_discard = 0;  // count the discard position
-        llama_tokens checkpoint_tokens;
-        std::vector<uint8_t> checkpoint_tgt, checkpoint_dft, checkpoint_spec;
-        llama_pos checkpoint_pos = 0;
+        uint64_t     last_used   = 0;
+        // Checkpoints use the same tokens and positions as the live dense KV.
+        // A slot can retain them only while its corresponding prefix stays intact.
+        std::vector<prompt_checkpoint> checkpoints;
+
+        void retain_checkpoints(llama_pos prefix) {
+            while (!checkpoints.empty() && checkpoints.back().pos > prefix) {
+                checkpoints.pop_back();
+            }
+        }
+
         void invalidate_checkpoint() {
-            checkpoint_tokens.clear();
-            std::vector<uint8_t>().swap(checkpoint_tgt);
-            std::vector<uint8_t>().swap(checkpoint_dft);
-            std::vector<uint8_t>().swap(checkpoint_spec);
-            checkpoint_pos = 0;
+            checkpoints.clear();
         }
     };
 
@@ -3642,6 +3659,7 @@ struct httpserver {
     bool                            shift_context = false;
     common_chat_templates_ptr       chat_templates;
     std::vector<cache_prompt_entry> cache_prompts;
+    uint64_t                        cache_prompt_clock = 0;
 
     // clip model
     std::mutex       llm_ctx_clip_mtx;
@@ -3987,6 +4005,94 @@ struct httpserver {
         llm_kv_cache_used -= n_discard;
     }
 
+    static constexpr llama_pos prompt_checkpoint_tail_margin = 128;
+
+    static llama_pos next_prompt_checkpoint_pos(llama_pos saved, llama_pos prompt_length) {
+        const llama_pos final_checkpoint = prompt_length - 1;
+        if (saved >= final_checkpoint) {
+            return 0;
+        }
+        // Retain a near-tail checkpoint for a change in the chat template suffix
+        // and interior checkpoints for edits or truncation of longer inputs.
+        if (prompt_length >= 2048) {
+            for (int quarter = 1; quarter < 4; ++quarter) {
+                const llama_pos interior = (prompt_length / 4) * quarter - 1;
+                if (interior > saved) {
+                    return interior;
+                }
+            }
+        }
+        const llama_pos near_tail = final_checkpoint - prompt_checkpoint_tail_margin;
+        if (near_tail > saved &&
+            (saved == 0 || near_tail - saved >= prompt_checkpoint_tail_margin)) {
+            return near_tail;
+        }
+        return final_checkpoint;
+    }
+
+    void save_prompt_checkpoint(cache_prompt_entry & entry, llama_seq_id seq, llama_pos pos, llama_pos prompt_length,
+                                llama_pos restored_pos) {
+        constexpr size_t max_checkpoints = 5;
+        constexpr size_t max_bytes = size_t(1536) * 1024 * 1024;
+        const auto flags = LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY;
+        const size_t target_size = llama_state_seq_get_size_ext(llm_ctx, seq, flags);
+        const size_t draft_size = llm_ctx_draft ? llama_state_seq_get_size_ext(llm_ctx_draft, seq, flags) : 0;
+        if (!target_size || target_size > max_bytes || draft_size > max_bytes - target_size ||
+            (llm_ctx_draft && !draft_size)) {
+            return;
+        }
+
+        try {
+            prompt_checkpoint saved;
+            saved.pos = pos;
+            saved.target.resize(target_size);
+            saved.draft.resize(draft_size);
+            if (llama_state_seq_get_data_ext(llm_ctx, saved.target.data(), target_size, seq, flags) != target_size ||
+                (draft_size && llama_state_seq_get_data_ext(llm_ctx_draft, saved.draft.data(), draft_size, seq, flags) != draft_size) ||
+                (spec && (!common_speculative_get_state(spec.get(), seq, saved.speculative) || saved.speculative.empty())) ||
+                saved.size() > max_bytes) {
+                return;
+            }
+
+            size_t bytes = saved.size();
+            for (const auto & checkpoint : entry.checkpoints) {
+                bytes += checkpoint.size();
+            }
+            while (entry.checkpoints.size() >= max_checkpoints || bytes > max_bytes) {
+                auto & checkpoints = entry.checkpoints;
+                // Keep the restored prefix available for a return to the previous
+                // turn. For small edits also retain its nearby predecessor.
+                const bool keep_latest = checkpoints.size() > 1 &&
+                    (pos < prompt_length - 1 ||
+                     pos - checkpoints.back().pos <= prompt_checkpoint_tail_margin);
+                const auto end = checkpoints.end();
+                const auto eviction_priority = [end, pos, restored_pos, keep_latest](auto it) {
+                    const auto next = it + 1;
+                    const llama_pos gap = (next == end ? pos : next->pos) - it->pos;
+                    int keep = keep_latest && next == end ? 1 : 0;
+                    if (it->pos == restored_pos) {
+                        keep = 3;
+                    } else if (next != end && next->pos == restored_pos && gap <= prompt_checkpoint_tail_margin &&
+                               pos - restored_pos <= 2 * prompt_checkpoint_tail_margin) {
+                        keep = 2;
+                    }
+                    return std::make_pair(keep, gap);
+                };
+                auto evict = checkpoints.begin();
+                for (auto it = evict + 1; it != end; ++it) {
+                    if (eviction_priority(it) < eviction_priority(evict)) {
+                        evict = it;
+                    }
+                }
+                bytes -= evict->size();
+                checkpoints.erase(evict);
+            }
+            entry.checkpoints.push_back(std::move(saved));
+        } catch (const std::bad_alloc &) {
+            // A checkpoint is an optimization. The active sequence is intact.
+        }
+    }
+
     inline int32_t decode_completion_task_batch(llama_context * input_ctx, llama_batch & input_batch,
                                                 const std::vector<std::unique_ptr<btask>> & batch_task_ptrs) {
         // decoded results:
@@ -4002,21 +4108,29 @@ struct httpserver {
         for (int32_t i_batch_view = 0; i_batch_view < input_batch.n_tokens;) {
             int32_t n_batch_view = std::min(batch_view_max, input_batch.n_tokens - i_batch_view);
             completions_task * checkpoint_task = nullptr;
-            // Stop immediately after prompt token N-2: token N-1 must be evaluated
-            // again for logits when the identical prompt is reused.
+            llama_pos checkpoint_pos = 0;
+            // Stop at the first checkpoint boundary in this view. The final
+            // prompt token is always evaluated again for logits on a cache hit.
             if (hybrid_prompt_cache && cache_prompt && input_ctx == llm_ctx && input_batch.token) {
                 for (const auto & ptr : batch_task_ptrs) {
                     auto * task = dynamic_cast<completions_task *>(ptr.get());
                     if (!task || task->n_decoded || task->n_prefilling_request < 2 ||
                         task->tokenized_prompts_include_multimedias || !task->get_lora_adapters().empty()) continue;
-                    auto & entry = cache_prompts.at(task->get_seq_id());
-                    if (entry.checkpoint_pos != 0) continue;
-                    for (int32_t j = 0; j < n_batch_view; ++j) {
-                        int32_t k = i_batch_view + j;
-                        if (input_batch.n_seq_id[k] == 1 && input_batch.seq_id[k][0] == task->get_seq_id() &&
-                            input_batch.pos[k] == task->n_prefilling_request - 2) {
+                    const auto & entry = cache_prompts.at(task->get_seq_id());
+                    llama_pos saved = entry.checkpoints.empty() ? 0 : entry.checkpoints.back().pos;
+                    llama_pos next = next_prompt_checkpoint_pos(saved, task->n_prefilling_request);
+                    for (int32_t j = 0; next > 0 && j < n_batch_view; ++j) {
+                        const int32_t k = i_batch_view + j;
+                        if (input_batch.n_seq_id[k] != 1 || input_batch.seq_id[k][0] != task->get_seq_id()) continue;
+                        const llama_pos pos = input_batch.pos[k] + 1;
+                        // A reused prefix can already cover an interior boundary.
+                        while (next > 0 && next < pos) {
+                            next = next_prompt_checkpoint_pos(next, task->n_prefilling_request);
+                        }
+                        if (next == pos) {
                             n_batch_view = j + 1;
                             checkpoint_task = task;
+                            checkpoint_pos = pos;
                             break;
                         }
                     }
@@ -4123,32 +4237,9 @@ struct httpserver {
                 }
             }
             if (checkpoint_task) {
-                auto & entry = cache_prompts.at(checkpoint_task->get_seq_id());
-                const auto flags = LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY;
                 const auto seq = checkpoint_task->get_seq_id();
-                const size_t target_size = llama_state_seq_get_size_ext(llm_ctx, seq, flags);
-                const size_t draft_size = llm_ctx_draft ? llama_state_seq_get_size_ext(llm_ctx_draft, seq, flags) : 0;
-                // One bounded checkpoint per slot; fall back to full prefill on failure.
-                constexpr size_t max_checkpoint_bytes = size_t(768) * 1024 * 1024;
-                if (target_size && target_size <= max_checkpoint_bytes && draft_size <= max_checkpoint_bytes - target_size) {
-                    try {
-                        entry.checkpoint_tgt.resize(target_size);
-                        entry.checkpoint_dft.resize(draft_size);
-                        bool ok = llama_state_seq_get_data_ext(llm_ctx, entry.checkpoint_tgt.data(), target_size, seq, flags) == target_size;
-                        if (draft_size) ok = ok && llama_state_seq_get_data_ext(llm_ctx_draft, entry.checkpoint_dft.data(), draft_size, seq, flags) == draft_size;
-                        if (spec) ok = common_speculative_get_state(spec.get(), seq, entry.checkpoint_spec) &&
-                                       !entry.checkpoint_spec.empty() && ok;
-                        if (ok) {
-                            entry.checkpoint_tokens = checkpoint_task->processed_tokens;
-                            entry.checkpoint_pos = checkpoint_task->n_prefilling_request - 1;
-                        }
-                    } catch (const std::bad_alloc &) {
-                        entry.checkpoint_pos = 0;
-                    }
-                }
-                if (!entry.checkpoint_pos) {
-                    entry.checkpoint_tgt.clear(); entry.checkpoint_dft.clear(); entry.checkpoint_spec.clear();
-                }
+                save_prompt_checkpoint(cache_prompts.at(seq), seq, checkpoint_pos, checkpoint_task->n_prefilling_request,
+                                       checkpoint_task->n_prefilled_cached);
             }
             i_batch_view += n_batch_view;
         }
@@ -4159,21 +4250,8 @@ struct httpserver {
     //
     // Logics
     //
-#if defined(linux) || defined(__linux) || defined(__linux__)
-#    define PIN_THREAD                                                        \
-        cpu_set_t cpu_mask;                                                   \
-        CPU_ZERO(&cpu_mask);                                                  \
-        CPU_SET(sched_getcpu(), &cpu_mask);                                   \
-        pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpu_mask); \
-        sched_param cpu_sched_param{ 80 };                                    \
-        pthread_setschedparam(pthread_self(), SCHED_FIFO, &cpu_sched_param);
-#else
-#    define PIN_THREAD
-#endif
-
     void reconcile_loop(const std::shared_ptr<httplib::Server> & server) {
-        PIN_THREAD;
-
+        // Keep the normal scheduling policy so an HTTP worker can stream while inference is active.
         while (server->is_running()) {
             reconcile();
         }
@@ -4361,6 +4439,7 @@ struct httpserver {
                             size_t    seq_lcp_l           = 0;
                             llama_pos seq_lcp_pos         = 0;
                             llama_pos seq_lcp_pos_discard = 0;
+                            const prompt_checkpoint * selected_checkpoint = nullptr;
                             for (int32_t i = 0; i < params.llm_params.n_threads_http; i++) {
                                 cache_prompt_entry & cache = cache_prompts.at(i);
                                 if (cache.used) {
@@ -4371,18 +4450,32 @@ struct httpserver {
                                     continue;
                                 }
                                 size_t lcp_l = common_lcp(cache.tokens, tokens);
+                                const prompt_checkpoint * checkpoint = nullptr;
                                 if (hybrid_prompt_cache) {
-                                    lcp_l = !task->tokenized_prompts_include_multimedias &&
-                                            task->get_lora_adapters().empty() && cache.checkpoint_pos > 0 &&
-                                            cache.pos >= cache.checkpoint_pos && cache.tokens.size() >= tokens.size() &&
-                                            cache.checkpoint_tokens == tokens ? tokens.size() : 0;
+                                    // Leave a token for logits. Only restore a recorded
+                                    // position covered by the shared live dense KV.
+                                    if (!task->tokenized_prompts_include_multimedias &&
+                                        task->get_lora_adapters().empty() && cache.pos_discard == 0) {
+                                        for (auto it = cache.checkpoints.rbegin(); it != cache.checkpoints.rend(); ++it) {
+                                            if (it->pos <= cache.pos && size_t(it->pos) <= lcp_l &&
+                                                size_t(it->pos) < tokens.size()) {
+                                                checkpoint = &*it;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    lcp_l = checkpoint ? size_t(checkpoint->pos) : 0;
                                 }
                                 if (lcp_l > seq_lcp_l) {
                                     seq_lcp_id          = i;
                                     seq_lcp_l           = lcp_l;
                                     seq_lcp_pos         = cache.pos;
                                     seq_lcp_pos_discard = cache.pos_discard;
-                                } else if (seq_lcp_id < 0) {
+                                    selected_checkpoint = checkpoint;
+                                } else if (seq_lcp_l == 0 && (seq_lcp_id < 0 ||
+                                           std::make_pair(cache.pos != 0, cache.last_used) <
+                                           std::make_pair(cache_prompts[seq_lcp_id].pos != 0, cache_prompts[seq_lcp_id].last_used))) {
+                                    // Keep idle prefixes while an empty slot is available.
                                     seq_lcp_id = i;
                                 }
                             }
@@ -4396,18 +4489,20 @@ struct httpserver {
                             }
                             // hit cache
                             else {
-                                int32_t   cached = int32_t(seq_lcp_l) - 1;
+                                int32_t   cached = selected_checkpoint ? selected_checkpoint->pos : int32_t(seq_lcp_l) - 1;
                                 llama_pos pos    = std::min(seq_lcp_pos - 1, cached);
-                                if (hybrid_prompt_cache) {
-                                    auto & checkpoint = cache_prompts.at(seq_id);
+                                if (selected_checkpoint) {
+                                    const auto & checkpoint = *selected_checkpoint;
                                     const auto flags = LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY;
-                                    bool ok = checkpoint.checkpoint_pos == cached && !checkpoint.checkpoint_tgt.empty() &&
-                                        llama_state_seq_set_data_ext(llm_ctx, checkpoint.checkpoint_tgt.data(), checkpoint.checkpoint_tgt.size(), seq_id, flags) == checkpoint.checkpoint_tgt.size();
+                                    bool ok = llama_state_seq_set_data_ext(llm_ctx, checkpoint.target.data(), checkpoint.target.size(),
+                                                                          seq_id, flags) == checkpoint.target.size();
                                     if (ok && llm_ctx_draft) {
-                                        ok = !checkpoint.checkpoint_dft.empty() &&
-                                            llama_state_seq_set_data_ext(llm_ctx_draft, checkpoint.checkpoint_dft.data(), checkpoint.checkpoint_dft.size(), seq_id, flags) == checkpoint.checkpoint_dft.size();
+                                        ok = llama_state_seq_set_data_ext(llm_ctx_draft, checkpoint.draft.data(), checkpoint.draft.size(),
+                                                                          seq_id, flags) == checkpoint.draft.size();
                                     }
-                                    if (ok && spec) common_speculative_set_state(spec.get(), seq_id, checkpoint.checkpoint_spec);
+                                    if (ok && spec) {
+                                        common_speculative_set_state(spec.get(), seq_id, checkpoint.speculative);
+                                    }
                                     if (!ok) { cached = 0; pos = 0; }
                                     else pos = cached;
                                 }
@@ -4416,8 +4511,20 @@ struct httpserver {
                                     cached = 0;
                                     pos    = 0;
                                 }
+                                else if (llm_model_n_swa > 0 && hybrid_prompt_cache && pos > 0) {
+                                    // The next token needs the preceding n_swa - 1 positions.
+                                    // The saved SWA rows are contiguous because the checkpoint was taken during prefill.
+                                    const auto mem = llama_get_memory(llm_ctx);
+                                    const llama_pos pos_min = llama_memory_seq_pos_min(mem, seq_id);
+                                    const llama_pos pos_max = llama_memory_seq_pos_max(mem, seq_id);
+                                    if (pos_min < 0 || pos_min > std::max(0, pos - llm_model_n_swa + 1) ||
+                                        pos_max != pos - 1) {
+                                        cached = 0;
+                                        pos    = 0;
+                                    }
+                                }
                                 // check whether the requested content is hitting the range discarded by SWA.
-                                else if (llm_model_n_swa > 0 && seq_lcp_pos > int32_t(seq_lcp_l)) {
+                                else if (llm_model_n_swa > 0 && !hybrid_prompt_cache && seq_lcp_pos > int32_t(seq_lcp_l)) {
                                     const int32_t pos_min = llama_memory_seq_pos_min(llama_get_memory(llm_ctx), seq_id);
                                     if (pos_min < 0 || pos_min > std::max(0, pos - llm_model_n_swa)) {
                                         cached = 0;
@@ -4445,6 +4552,7 @@ struct httpserver {
                             llm_kv_cache_used -= cache.pos;
                             llm_kv_cache_inactive -= cache.pos;
                             cache.used        = true;
+                            cache.last_used   = ++cache_prompt_clock;
                             cache.pos         = 0;
                             cache.pos_discard = task->pos > 0 ? cache.pos_discard : 0;
                             task->set_seq_id(seq_id);
@@ -4463,9 +4571,8 @@ struct httpserver {
                                 cache.pos_discard = 0;
                                 task->pos = task->n_prefilled = task->n_prefilled_cached = task->n_processed_detokenized = 0;
                             }
-                            if (hybrid_prompt_cache && task->pos == 0) {
-                                cache.checkpoint_tokens.clear(); cache.checkpoint_tgt.clear(); cache.checkpoint_dft.clear();
-                                cache.checkpoint_spec.clear(); cache.checkpoint_pos = 0;
+                            if (hybrid_prompt_cache) {
+                                cache.retain_checkpoints(task->pos);
                             }
                             SRV_DBG(
                                 "rid %s | prefix cache, "
@@ -5922,8 +6029,6 @@ struct httpserver {
 
     int32_t process(const httplib::Request & request, httplib::Response & response,
                     std::unique_ptr<btask> && task_ptr) {
-        PIN_THREAD;
-
         const int32_t     tid        = task_ptr->get_id();
         const task_type   ttype      = task_ptr->get_type();
         const std::string rid        = task_ptr->get_r_id();

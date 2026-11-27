@@ -4,7 +4,9 @@
 Start two independent servers with the same model, context and sampling config;
 add --no-cache-prompt on reference. For MTP use --spec-type draft-mtp on both.
 Run with --candidate URL --reference URL --require-hit; add --require-mtp
-when both endpoints use MTP. Use --concurrency with at least two candidate slots.
+when both endpoints use MTP. Add --require-prefix-hits to check checkpoint reuse
+after continuation, truncation, and a suffix edit. Use --concurrency with at
+least two candidate slots to verify interleaved prompts and concurrent requests.
 Both endpoints must serve the same Qwen model with deterministic sampling.
 The reference endpoint must have prompt caching disabled.
 """
@@ -21,6 +23,7 @@ p.add_argument('--candidate', required=True)
 p.add_argument('--reference', required=True)
 p.add_argument('--model', help='override model ID reported by candidate')
 p.add_argument('--require-hit', action='store_true')
+p.add_argument('--require-prefix-hits', action='store_true')
 p.add_argument('--concurrency', action='store_true')
 p.add_argument('--require-mtp', action='store_true')
 p.add_argument('--timeout', type=float, default=240)
@@ -60,7 +63,39 @@ def edit(i):
     return x
 branch = edit(max(len(head) + 1, a.length * 3 // 4))
 distinct = edit(len(head) + 1)
-cases = [('cold', prompt, False, None), ('repeat', prompt, True, None), ('diverge-late', branch, False, None), ('repeat-branch', branch, True, None), ('diverge-early', distinct, False, None), ('repeat-early', distinct, True, None), ('return-original', prompt, False, None), ('repeat-original', prompt, True, None)]
+cases = [('cold', prompt, False, None), ('repeat', prompt, True, None)]
+minimum_prefix_hits = {}
+if a.require_prefix_hits:
+    assert a.length >= 256, 'prefix regression requires room for the near-tail checkpoint'
+    branch = edit(max(len(head) + 1, a.length - 64))
+    # Append a completed assistant turn, a new user turn, and the assistant prefix.
+    continuation = prompt + tok('4<|im_end|>\n<|im_start|>user\n'
+                                'Now answer 3+4 with a single digit.<|im_end|>\n'
+                                '<|im_start|>assistant\n<think>\n\n</think>\n\n')
+    truncated = prompt[:-4]
+    cases += [
+        ('append-turn', continuation, True, None),
+        ('repeat-appended-turn', continuation, True, None),
+        ('truncate', truncated, True, None),
+        ('repeat-truncation', truncated, True, None),
+        ('regrow', prompt, True, None),
+    ]
+    # The near-tail checkpoint is 128 tokens before the last-token replay boundary.
+    near_tail = a.length - 1 - 128
+    minimum_prefix_hits = {
+        'append-turn': a.length - 1,
+        'truncate': near_tail,
+        'regrow': len(truncated) - 1,
+        'diverge-late': near_tail,
+    }
+cases += [
+    ('diverge-late', branch, False, None),
+    ('repeat-branch', branch, True, None),
+    ('diverge-early', distinct, False, None),
+    ('repeat-early', distinct, True, None),
+    ('return-original', prompt, False, None),
+    ('repeat-original', prompt, True, None),
+]
 secret_tail = tok('\nRepeat the secret passcode exactly.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n')
 secret_fill = tok('Ignore this filler text. ')
 
@@ -72,6 +107,13 @@ def secret_prompt(value):
 secret_a = secret_prompt('4927')
 secret_b = secret_prompt('1358')
 cases += [('secret-a', secret_a, False, '4927'), ('repeat-secret-a', secret_a, True, '4927'), ('secret-b', secret_b, False, '1358'), ('repeat-secret-b', secret_b, True, '1358')]
+if a.concurrency:
+    cases += [
+        ('return-secret-a-after-b', secret_a, True, '4927'),
+        ('return-secret-b-after-a', secret_b, True, '1358'),
+    ]
+    minimum_prefix_hits['return-secret-a-after-b'] = len(secret_a) - 1
+    minimum_prefix_hits['return-secret-b-after-a'] = len(secret_b) - 1
 failed = []
 last = None
 reference_outputs = {}
@@ -80,10 +122,12 @@ reference_model = req(a.reference, '/v1/models')[0]['data'][0]
 model_id = a.model or candidate_model['id']
 candidate_meta = candidate_model['meta']
 reference_meta = reference_model['meta']
+if a.concurrency and candidate_meta.get('n_slot', 0) < 2:
+    raise SystemExit('Concurrency test requires at least two candidate slots')
 print(json.dumps({'candidate_meta': candidate_meta, 'reference_meta': reference_meta}, ensure_ascii=False), flush=True)
 if reference_meta.get('prompt_cache') is not False:
     raise SystemExit('Reference must have prompt caching disabled')
-if a.require_hit and candidate_meta.get('prompt_cache') is not True:
+if (a.require_hit or a.require_prefix_hits) and candidate_meta.get('prompt_cache') is not True:
     raise SystemExit('Candidate must have prompt caching enabled')
 for field in ('n_vocab', 'n_params', 'size'):
     if candidate_meta.get(field) != reference_meta.get(field):
@@ -110,8 +154,10 @@ for (name, tokens, musthit, expected) in cases:
             errors.append('empty output')
         if expected is not None and (expected not in text or expected not in rtext):
             errors.append('secret recall failed')
-        if a.require_hit and musthit and (not cached):
+        if (a.require_hit or a.require_prefix_hits) and musthit and not cached:
             errors.append('repeat did not hit')
+        if name in minimum_prefix_hits and (cached or 0) < minimum_prefix_hits[name]:
+            errors.append(f'prefix hit below {minimum_prefix_hits[name]} tokens')
         if a.require_mtp and (not (cu.get('draft_tokens', 0) > 0 and ru.get('draft_tokens', 0) > 0)):
             errors.append('MTP did not draft')
         row = {'case': name, 'tokens': len(tokens), 'lcp_previous': None if last is None else lcp(tokens, last), 'cached': cached, 'candidate_seconds': ct, 'reference_seconds': rt, 'candidate_text': text, 'reference_text': rtext, 'draft_tokens': cu.get('draft_tokens'), 'errors': errors}
@@ -125,35 +171,30 @@ for (name, tokens, musthit, expected) in cases:
         print(json.dumps({'case': name, 'error': repr(e)}), flush=True)
         break
 if a.concurrency and (not failed):
-    meta = req(a.candidate, '/v1/models')[0]['data'][0]['meta']
-    if meta.get('n_slot', 0) < 2:
-        failed.append('concurrency test requires at least two candidate slots')
-    else:
-
-        def concurrent_request(item):
-            (expected, tokens) = item
-            body = {'model': model_id, 'prompt': tokens, 'max_tokens': a.max_tokens, 'temperature': 0, 'seed': 42, 'stream': False}
-            (result, seconds) = req(a.candidate, '/v1/completions', body)
-            return (expected, result, seconds)
-        for turn in range(2):
-            try:
-                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-                    results = list(pool.map(concurrent_request, [('4927', secret_a), ('1358', secret_b)]))
-                for (expected, result, seconds) in results:
-                    usage = result['usage']
-                    output = result['choices'][0]['text']
-                    cached = usage.get('prompt_tokens_details', {}).get('cached_tokens')
-                    errors = []
-                    if output != reference_outputs[expected] or expected not in output:
-                        errors.append('concurrent output differs from reference')
-                    if usage['prompt_tokens'] != a.length or cached is None or (not 0 <= cached <= a.length):
-                        errors.append('invalid token accounting')
-                    if a.require_mtp and (not usage.get('draft_tokens', 0)):
-                        errors.append('MTP did not draft')
-                    failed.extend((f'concurrent {turn} {expected}: {error}' for error in errors))
-                    print(json.dumps({'case': 'concurrent', 'turn': turn, 'secret': expected, 'cached': cached, 'seconds': seconds, 'errors': errors}, ensure_ascii=False), flush=True)
-            except Exception as e:
-                failed.append(f'concurrent {turn}: {e!r}')
-                break
+    def concurrent_request(item):
+        (expected, tokens) = item
+        body = {'model': model_id, 'prompt': tokens, 'max_tokens': a.max_tokens, 'temperature': 0, 'seed': 42, 'stream': False}
+        (result, seconds) = req(a.candidate, '/v1/completions', body)
+        return (expected, result, seconds)
+    for turn in range(2):
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                results = list(pool.map(concurrent_request, [('4927', secret_a), ('1358', secret_b)]))
+            for (expected, result, seconds) in results:
+                usage = result['usage']
+                output = result['choices'][0]['text']
+                cached = usage.get('prompt_tokens_details', {}).get('cached_tokens')
+                errors = []
+                if output != reference_outputs[expected] or expected not in output:
+                    errors.append('concurrent output differs from reference')
+                if usage['prompt_tokens'] != a.length or cached is None or (not 0 <= cached <= a.length):
+                    errors.append('invalid token accounting')
+                if a.require_mtp and (not usage.get('draft_tokens', 0)):
+                    errors.append('MTP did not draft')
+                failed.extend((f'concurrent {turn} {expected}: {error}' for error in errors))
+                print(json.dumps({'case': 'concurrent', 'turn': turn, 'secret': expected, 'cached': cached, 'seconds': seconds, 'errors': errors}, ensure_ascii=False), flush=True)
+        except Exception as e:
+            failed.append(f'concurrent {turn}: {e!r}')
+            break
 print(json.dumps({'ok': not failed, 'errors': failed}, ensure_ascii=False), flush=True)
 sys.exit(bool(failed))
