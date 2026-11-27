@@ -59,6 +59,27 @@ The Qwen recurrent replay update changes runtime state and several backends.
 The Unsloth quantized-KV updates depend on a different CUDA attention layout.
 Both remain separate from this sync. [llama.cpp #31669](https://github.com/ggml-org/llama.cpp/pull/31669), [Unsloth #303](https://github.com/unslothai/llama.cpp/pull/303)
 
+The November 27 follow-up brings over additional performance and input
+validation fixes from the same upstream revision.
+
+- BPE tokenization reduces merge-queue work and allocations. Large CPU
+  `GET_ROWS` operations use all available worker threads. [llama.cpp #30962](https://github.com/ggml-org/llama.cpp/pull/30962), [#32859](https://github.com/ggml-org/llama.cpp/pull/32859), [#32514](https://github.com/ggml-org/llama.cpp/pull/32514)
+- The C++ GGUF reader validates tensor types before conversion, and the Python
+  reader checks tensor extents using Python integer offsets. GBNF repetition counts are range-checked.
+  Buffered model reads resume after a partial direct read, and CUDA matrix-vector
+  kernels compute matrix offsets with 64-bit arithmetic. [llama.cpp #32641](https://github.com/ggml-org/llama.cpp/pull/32641), [#32495](https://github.com/ggml-org/llama.cpp/pull/32495), [#32551](https://github.com/ggml-org/llama.cpp/pull/32551), [#32545](https://github.com/ggml-org/llama.cpp/pull/32545), [#32965](https://github.com/ggml-org/llama.cpp/pull/32965)
+- cpp-httplib advances to 0.67.0. The retained mtmd implementation validates
+  required HunyuanVL and LLaVA tensors and uses the MiniCPM-V projector's
+  output width for its embedding size. [llama.cpp #32563](https://github.com/ggml-org/llama.cpp/pull/32563), [#32131](https://github.com/ggml-org/llama.cpp/pull/32131), [#32129](https://github.com/ggml-org/llama.cpp/pull/32129), [#32132](https://github.com/ggml-org/llama.cpp/pull/32132)
+
+All 15 CPU tokenizer suites and 261 CPU `GET_ROWS` cases passed. Token IDs
+matched the baseline with both special-token modes on a 149,010-byte corpus
+of Chinese text, code and emoji. Median isolated tokenization time fell from
+55.11 to 36.93 ms for Qwen3.5 and from 35.90 to 17.62 ms for Gemma 4.
+The integrated CUDA build on the RTX 3090 passed Gemma 4 E2B single- and
+four-slot chat and Qwen3.8-27B MTP streaming and non-streaming chat. The
+three projector changes have build coverage.
+
 Some historical patches in `llama-box/patches` are already applied in the
 fork; an apply warning by itself does not mean a change is missing. Check both
 the fork contents and the relevant build configuration before changing them.
