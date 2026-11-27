@@ -154,7 +154,10 @@ def verify(args, case, row, expected, original_hash, warm_hash, reference):
     lcp = row["previous_lcp_tokens"]
     if row["prompt_tokens"] != len(expected):
         errors.append("server did not process the exact input token count")
-    if row["completion_tokens"] != args.output_tokens or row["finish_reason"] != "length":
+    filled_budget = row["completion_tokens"] == args.output_tokens and row["finish_reason"] == "length"
+    natural_stop = (args.accept_natural_stop and 0 < row["completion_tokens"] <= args.output_tokens
+                    and row["finish_reason"] == "stop")
+    if not (filled_budget or natural_stop):
         errors.append("generation did not consume the output budget")
     if not isinstance(cached, int) or not 0 <= cached <= lcp:
         errors.append("reported cache reuse exceeds the verified prefix")
@@ -271,6 +274,8 @@ def main():
     parser.add_argument("--capture-output", action="store_true", help="retain synthetic output for diagnostics")
     parser.add_argument("--report-cold-drift", action="store_true",
                         help="report cold versus cached hashes separately when CUDA prefill shapes differ")
+    parser.add_argument("--accept-natural-stop", action="store_true",
+                        help="accept a model stop within the output budget and record its actual token count")
     parser.add_argument("--reference-jsonl", type=Path)
     parser.add_argument("--min-mem-available-mib", type=int, default=0)
     parser.add_argument("--timeout", type=float, default=900)
