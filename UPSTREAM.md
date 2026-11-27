@@ -80,6 +80,30 @@ The integrated CUDA build on the RTX 3090 passed Gemma 4 E2B single- and
 four-slot chat and Qwen3.8-27B MTP streaming and non-streaming chat. The
 three projector changes have build coverage.
 
+The GB10 sync adds a Linux ARM64 job for CUDA 13.0.3 with `121a-real`,
+the SM121a target recommended for DGX Spark. Its CUDA runtime matches the
+DGX OS 7.6.0 software stack with driver 580.178.04. [NVIDIA build guide](https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/llama-cpp), [DGX Spark release notes](https://docs.nvidia.com/dgx/dgx-spark/release-notes.html)
+
+- CUDA adds few-row MMQ for dense and MoE matrix multiplication, including
+  zero-block quantization and GB10 dispatch starting at two tokens for
+  eligible quantizations. [llama.cpp #31533](https://github.com/ggml-org/llama.cpp/pull/31533), [#32065](https://github.com/ggml-org/llama.cpp/pull/32065), [#32566](https://github.com/ggml-org/llama.cpp/pull/32566)
+- Quantized cuBLAS operations on GB10 prefer BF16 inputs with FP32
+  accumulation in automatic mode. The backport takes the GB10 branch of
+  the upstream policy and uses the existing precision overrides. CUDA
+  packs eight NVFP4 blocks per dequantization thread block. [llama.cpp #30672](https://github.com/ggml-org/llama.cpp/pull/30672), [#32875](https://github.com/ggml-org/llama.cpp/pull/32875)
+- Multi-stage Flash Attention rotates the order of K/V reads for better L2
+  reuse. MMQ sets the shared-memory limit for the selected kernel. [llama.cpp #32407](https://github.com/ggml-org/llama.cpp/pull/32407), [#32392](https://github.com/ggml-org/llama.cpp/pull/32392)
+- On WSL2 with an integrated GPU such as RTX Spark N1X, CUDA supplies free
+  GPU memory. On native Linux UMA devices such as DGX Spark, the backend
+  uses host memory information. The WSL2 backport comes from an open
+  upstream pull request. [llama.cpp #31670](https://github.com/ggml-org/llama.cpp/issues/31670), [#31673](https://github.com/ggml-org/llama.cpp/pull/31673)
+
+CUDA 13.0 generated native SM121a cubins for the affected kernels. On the
+RTX 3090, 33 matrix multiplication, 21 NVFP4 dequantization and 248 Flash
+Attention cases passed against CPU reference results. The WSL2 memory
+policy passed all eight host-side test cases. GB10 and RTX Spark runtime
+performance remains to be measured on the target devices.
+
 Some historical patches in `llama-box/patches` are already applied in the
 fork; an apply warning by itself does not mean a change is missing. Check both
 the fork contents and the relevant build configuration before changing them.
